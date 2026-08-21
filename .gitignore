@@ -1,0 +1,47 @@
+# --- Python ---------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+env/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# --- Node / Vite ----------------------------------------------------------
+node_modules/
+web/dist/
+web/.vite/
+npm-debug.log*
+pnpm-debug.log*
+yarn-error.log*
+
+# --- Editors / OS ---------------------------------------------------------
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# --- MANTIS data ----------------------------------------------------------
+# Generated populations are reproducible from a seed; do not commit them.
+data/generated/*
+!data/generated/.gitkeep
+
+# The LLM cache IS committed on purpose. A judge cloning this repo will not
+# have Ollama running, so the cache is what makes `make demo` work offline.
+# See CLAUDE.md HARD RULE 3. Do not add data/cache/ here.
+
+# Model artefacts are rebuilt by the pipeline.
+*.joblib
+*.pkl
+*.lgb
+
+# Never commit credentials. The repo must not need any.
+.env
+*.pem
+kaggle.json
