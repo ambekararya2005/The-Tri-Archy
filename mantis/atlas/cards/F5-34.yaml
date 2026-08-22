@@ -1,7 +1,7 @@
 id: F5-34
 name: Agent-platform compromise and mass mandate minting
 family: F5
-status: implemented
+status: mapped
 rails:
   - agentic
 actor: >-
@@ -44,7 +44,6 @@ mitigations:
   - Rate-limit mandate issuance per platform and alert on deviation from its own baseline.
   - Require customer-side confirmation for mandates above an authority threshold.
   - Give issuers a platform-level kill switch that does not require blocking each customer.
-generator: mantis.foundry.injectors.f5_34_platform_compromise:inject
 detected_by:
   - L1
   - L2

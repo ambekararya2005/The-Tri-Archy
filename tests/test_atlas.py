@@ -5,12 +5,21 @@ fastest way to lose that criterion is to be caught overclaiming. So the counts
 are asserted, not assumed:
 
 * 42 cards, split 12/6/8/6/5/5 across F1-F6.
-* Exactly 15 carry a working injector. That number goes in the writeup verbatim.
-* Every family has at least one implemented card, so the coverage claim is
+* Exactly 8 carry a working injector. That number goes in the writeup verbatim,
+  and it is a **ratchet**: it moves only when an injector actually lands.
+* Implemented cards span at least four families, so the coverage claim is
   genuinely broad rather than four variations of one attack.
 * A card is ``implemented`` **only** if it names a generator, and a ``mapped``
   card names none. A mapped card carrying a generator path implies an injector
   that does not exist, which is exactly the overclaim these tests exist to stop.
+
+Note on the count. Day 1 marked 15 cards ``implemented`` on the strength of a
+planned generator path. Day 2 made the atlas executable — importing
+``mantis.foundry.injectors`` now *fails* unless every implemented card has real
+code behind it (see ``tests/test_injectors.py``) — so the seven cards with no
+injector yet were returned to ``mapped``. The number went down because the
+definition got stricter, and it goes back up as Day 3 lands the F1 and F5
+agentic injectors.
 """
 
 from __future__ import annotations
@@ -32,7 +41,12 @@ EXPECTED_FAMILY_SIZES: dict[Family, int] = {
 }
 
 EXPECTED_TOTAL = 42
-EXPECTED_IMPLEMENTED = 15
+EXPECTED_IMPLEMENTED = 8
+
+#: Families with a working injector today. F1 (mandate abuse) and F5 (platform
+#: integrity) are the agentic injectors scheduled for Day 3; they are absent
+#: here rather than faked, and this set is the ratchet that records it.
+EXPECTED_IMPLEMENTED_FAMILIES = {Family.F2, Family.F3, Family.F4, Family.F6}
 
 
 def test_atlas_is_complete() -> None:
@@ -44,15 +58,16 @@ def test_family_sizes_match_the_plan() -> None:
     assert {f: len(cards) for f, cards in grouped.items()} == EXPECTED_FAMILY_SIZES
 
 
-def test_exactly_fifteen_cards_are_implemented() -> None:
+def test_exactly_eight_cards_are_implemented() -> None:
     """The number we say out loud. If this changes, the writeup changes with it."""
     assert len(implemented()) == EXPECTED_IMPLEMENTED
 
 
-def test_every_family_has_an_implemented_card() -> None:
+def test_implemented_cards_span_several_families() -> None:
     """Coverage has to be broad, not four flavours of the same attack."""
     covered = {card.family for card in implemented()}
-    assert covered == set(Family)
+    assert covered == EXPECTED_IMPLEMENTED_FAMILIES
+    assert len(covered) >= 4
 
 
 def test_card_ids_are_contiguous_and_family_aligned() -> None:
@@ -141,3 +156,15 @@ def test_summary_states_the_implemented_split() -> None:
     assert "HONEST COUNT" in text
     assert f"{EXPECTED_TOTAL} vectors mapped" in text
     assert f"{EXPECTED_IMPLEMENTED} of them have a working injector" in text
+
+
+def test_implemented_cards_all_have_a_registered_injector() -> None:
+    """The seam between Pillar 1 and Pillar 2, asserted from the atlas side too.
+
+    ``mantis.foundry.injectors`` raises at import if this is violated; asserting
+    it here as well means the failure is legible in the test report rather than
+    arriving as a collection error.
+    """
+    from mantis.foundry.injectors import REGISTRY
+
+    assert {c.id for c in implemented()} == set(REGISTRY)

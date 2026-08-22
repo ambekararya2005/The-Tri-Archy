@@ -1,7 +1,7 @@
 id: F2-16
 name: Agent-farm account bootstrapping for bust-out
 family: F2
-status: mapped
+status: implemented
 rails:
   - ecom
   - agentic
@@ -41,6 +41,7 @@ mitigations:
   - Review limit increases at portfolio level, not per account.
   - Cluster new accounts on device, address and agent-platform evidence before granting authority.
   - Treat abnormally low variance in behaviour as a risk signal rather than a good one.
+generator: mantis.foundry.injectors.f2_16_bust_out:inject
 detected_by:
   - L1
   - L2

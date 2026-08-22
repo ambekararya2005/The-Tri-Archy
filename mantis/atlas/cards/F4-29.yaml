@@ -1,7 +1,7 @@
 id: F4-29
 name: Attribution-guided feature-space evasion
 family: F4
-status: implemented
+status: mapped
 rails:
   - agentic
   - ecom
@@ -49,7 +49,6 @@ mitigations:
   - Keep deterministic mandate rules in the fusion so tabular evasion alone is never sufficient.
   - Retrain against adversary output and report the evasion rate across generations.
   - Prefer layer diversity to single-model accuracy; the layers fail in different directions.
-generator: mantis.foundry.injectors.f4_29_shap_guided:inject
 detected_by:
   - L0
   - L1

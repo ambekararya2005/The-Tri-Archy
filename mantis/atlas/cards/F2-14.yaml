@@ -1,7 +1,7 @@
 id: F2-14
 name: Unregistered and forged Know-Your-Agent credentials
 family: F2
-status: implemented
+status: mapped
 rails:
   - agentic
   - ecom
@@ -46,7 +46,6 @@ mitigations:
   - Verify the KYA credential against the registry at authorisation, not at onboarding only.
   - Apply a lower authority ceiling to unregistered agents rather than a blanket decline.
   - Score the credential alongside behavioural evidence, never as a standalone rule.
-generator: mantis.foundry.injectors.f2_14_kya_evasion:inject
 detected_by:
   - L0
   - L1

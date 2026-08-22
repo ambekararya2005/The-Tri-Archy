@@ -1,7 +1,7 @@
 id: F5-33
 name: Tool-descriptor poisoning
 family: F5
-status: implemented
+status: mapped
 rails:
   - agentic
 actor: >-
@@ -44,7 +44,6 @@ mitigations:
   - Pin tool descriptors by digest and re-verify before use; treat a change as a new tool.
   - Strip or quarantine instruction-shaped text in tool metadata before the planner sees it.
   - Enforce payment constraints outside the agent, so a poisoned descriptor cannot widen scope.
-generator: mantis.foundry.injectors.f5_33_tool_poisoning:inject
 detected_by:
   - L0
   - L1

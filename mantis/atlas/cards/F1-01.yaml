@@ -1,7 +1,7 @@
 id: F1-01
 name: Cart-mandate tampering via indirect prompt injection
 family: F1
-status: implemented
+status: mapped
 rails:
   - agentic
   - ecom
@@ -49,7 +49,6 @@ mitigations:
   - Treat all retrieved content as data — strip or quarantine instruction-shaped text before it reaches the planner.
   - Require explicit human re-confirmation whenever the basket changes after content ingestion.
   - Enforce merchant allow-lists at the network rather than inside the agent, so a compromised planner cannot widen its own scope.
-generator: mantis.foundry.injectors.f1_01_cart_tamper:inject
 detected_by:
   - L0
   - L1

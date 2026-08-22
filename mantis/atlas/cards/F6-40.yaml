@@ -1,7 +1,7 @@
 id: F6-40
 name: Stored-value and gift-card cash-out chains
 family: F6
-status: mapped
+status: implemented
 rails:
   - ecom
   - agentic
@@ -40,6 +40,7 @@ mitigations:
   - Apply step-up authentication to stored-value purchases above a low threshold.
   - Delay redemption for newly purchased instruments.
   - Monitor convergence of unrelated purchasers onto shared redeeming entities.
+generator: mantis.foundry.injectors.f6_40_stored_value:inject
 detected_by:
   - L1
   - L4

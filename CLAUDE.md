@@ -196,11 +196,12 @@ When time runs out — and it will — sacrifice in **this order**, top first:
 - **Day 0 complete**: constitution, scaffold, frozen `TxEvent` schema, atlas
   schema + loader, first 8 attack cards, schema round-trip tests.
 - **Day 1 complete**:
-  - **Atlas finished at 42 cards** (F1 12, F2 6, F3 8, F4 6, F5 5, F6 5), of
-    which **exactly 15 are `implemented`** and 27 are `mapped`. Every family has
-    at least one implemented card. `python -m mantis.atlas.loader` prints the
-    split under an "HONEST COUNT" heading; `tests/test_atlas.py` locks the
-    numbers so the writeup cannot drift from the repo.
+  - **Atlas finished at 42 cards** (F1 12, F2 6, F3 8, F4 6, F5 5, F6 5).
+    `python -m mantis.atlas.loader` prints the implemented/mapped split under an
+    "HONEST COUNT" heading; `tests/test_atlas.py` locks the numbers so the
+    writeup cannot drift from the repo. (Day 1 claimed 15 implemented on the
+    strength of planned generator paths; Day 2 made that claim enforceable and
+    the count is now **8**. See §8 Day 2.)
   - **Legitimate population simulator** in `mantis/foundry/base/`:
     `reference.py` (calibration + Indian-market priors), `entities.py` (standing
     customer/card/device/merchant/agent map), `simulator.py` (the draw),
@@ -212,9 +213,36 @@ When time runs out — and it will — sacrifice in **this order**, top first:
   writes `data/generated/population.parquet` (~15 MB, ~8 s) plus a manifest and
   `docs/population_calibration.png`; amount KS 0.0051, hour TV 0.0066, MCC mix
   max delta 0.0010; 42 cards load clean; 65 tests pass; ruff clean.
-- **Next up**: injectors (`foundry/injectors/`) for the 15 implemented cards,
-  then the fidelity scorecard, then the firewall. Do not start these before the
-  day they are scheduled.
+- **Day 2 complete**:
+  - **Injector framework** in `mantis/foundry/injectors/base.py`: `BaseAttack`
+    (ABC, `inject(population, intensity, rng) -> DataFrame`), a `PopulationView`
+    of read-only indices over the background, and the `REGISTRY`.
+    **`validate_registry()` runs at package import and fails the import** unless
+    the atlas and the code agree in *both* directions - every `implemented` card
+    has an injector, every injector names a real `implemented` card, and each
+    card's `generator` path resolves to a callable in that injector's own
+    module. This is the seam that makes Pillar 1 executable rather than
+    decorative, and `tests/test_injectors.py` fires it deliberately to prove it
+    is load-bearing.
+  - **Eight tabular injectors**, one per card: F4-27 adaptive BIN, F4-28
+    threshold probing / just-under structuring, F2-13 synthetic identity
+    onboarding, F2-16 synthetic-identity bust-out, F3-19 digital-arrest APP
+    scam, F6-38 mule-network fan-in/fan-out, F6-39 transaction laundering via
+    miscoded MCC, F6-40 stored-value cash-out ring.
+  - **Separability probe** in `injectors/probe.py`: a depth-1 stump on every
+    single column (categoricals exploded per level, null patterns and list
+    lengths included, raw identifiers excluded with written reasons), reporting
+    the stronger of the stump AUC and the column's own rank AUC. Gate is 0.95.
+  - `mantis/foundry/__main__.py` is the Day 2 CLI and gate.
+- **Day 2 gate (passing)**:
+  `python -m mantis.foundry --attacks all --out data/generated/dataset_v1.parquet`
+  writes 201,290 rows (~15 MB, ~40 s including the probe) plus a manifest.
+  Prevalence **0.6409%** (200,000 legitimate / 1,290 fraud). Best-single-feature
+  AUC per attack: F2-13 0.639, F2-16 0.627, F3-19 0.872, F4-27 0.663,
+  F4-28 0.801, F6-38 0.787, F6-39 0.792, F6-40 0.676; **all fraud combined
+  0.609**. 102 tests pass; ruff clean.
+- **Next up**: the fidelity scorecard (`foundry/fidelity/`), then the firewall.
+  Do not start these before the day they are scheduled.
 
 - **Day 1 audit complete** (`scripts/audit_population.py`, 30/30 checks). It is
   adversarial by design and re-runnable: `python scripts/audit_population.py`.
@@ -255,3 +283,63 @@ When time runs out — and it will — sacrifice in **this order**, top first:
 - **Amount KS is non-zero by design** (round-number snapping) and the national
   Zipf curve is flatter than the per-pool exponent (locality-conditioned
   merchant choice). Both are explained on the figure rather than tuned away.
+
+### Day 2 decisions worth not relitigating
+
+- **The implemented count went 15 -> 8, and that is a tightening, not a
+  regression.** Day 1's convention was "implemented iff a `generator` path is
+  named". Day 2 replaced it with "implemented iff an injector exists, is
+  registered, and its declared path resolves" - checked at import. Nine cards
+  (F1-01, F1-02, F1-09, F1-10, F2-14, F3-20, F4-29, F5-33, F5-34) named a path
+  with no code and went back to `mapped`; F2-16 and F6-40 gained injectors and
+  were promoted. The number is now a **ratchet**: it moves only when code lands.
+  F1 and F5 have no implemented card today; they return on Day 3 with the
+  agentic injectors, and `tests/test_atlas.py` pins the family set so that is a
+  deliberate act rather than a drift.
+- **Four of the Day 2 attack ids were remapped to the cards that actually carry
+  those semantics.** The requested list named F2-17 for bust-out, F2-18 for
+  mule fan-in, F5-34 for miscoded-MCC laundering and F4-28 for card
+  enumeration; in the frozen atlas those ids are merchant onboarding, agent
+  reputation farming, platform compromise and threshold structuring. Injectors
+  were written against **F2-16, F6-38, F6-39 and F4-28** - the cards whose
+  `description` and `observable_signals` match the attack - because an injector
+  that generates something other than what its card describes is exactly the
+  overclaim the registry assertion exists to prevent.
+- **Chargeback / refund abuse is not representable and was substituted, not
+  faked.** `TxEvent` is an authorisation message: no refund flag, no dispute
+  outcome, no authorisation response code. F6-40 (stored-value cash-out ring)
+  ships in its place - same actor, same ring topology, same objective, every
+  claimed signal present in the data. This is the same constraint that keeps
+  F1-03 at `mapped`, and it is recorded in `f6_40_stored_value.py`'s docstring
+  so the substitution is visible rather than quietly absent.
+- **Injectors return only new rows and never mutate the background.** The Day 1
+  calibration was measured on that background; editing it in place would make
+  the fidelity scorecard measure the attacks instead of the simulation. It also
+  makes per-attack accounting and the zero-day holdout separable by
+  construction.
+- **Attack events are clones of real background rows, retargeted.** Card BIN,
+  device, IP, geo, entry mode, 3DS outcome and the nullity pattern all come from
+  the legitimate population. Amounts are resampled from the population's *own*
+  per-MCC empirical distribution inside a quantile band. Fraud that only touches
+  freshly-minted entities is trivially detectable; a test asserts every attack
+  customer and merchant already exists.
+- **The probe caught two generator artefacts, both now fixed in the framework.**
+  Injectors originally scheduled uniformly across the 24 hours, which against a
+  diurnal population made `ts_hour` the strongest single feature on three
+  attacks; `set_timestamps` now redraws each event's time of day from the
+  background's own hour curve (blended 18% toward uniform), shifting whole
+  bursts together via a `groups` argument so escalation gaps and cultivation
+  cadence survive intact. Campaign starts were also drawn uniformly and left
+  calendar gaps the probe read as a `ts_epoch` signal; `spread_epochs` is now
+  stratified. Two attack-level artefacts went the same way: F2-13's cohort was
+  filtered to a late first-seen date (0.81 AUC on `ts_epoch`) and F3-19 used one
+  fixed amount cap that pinned most of a campaign to a single repeated number.
+- **F3-19 at 0.872 on `amount` is the honest ceiling, not a bug.** A coerced
+  transfer really does sit at the top of its victim's range. What the number
+  does not support is a threshold - the population's 87th percentile is ordinary
+  traffic - so recall must come from `amount_vs_customer_p99` and beneficiary
+  fan-in. Every injector records its measured number in its module docstring.
+- **Prevalence, not raw count, is the invariant.** `BaseAttack.n_events` scales
+  `base_events` by the actual background size against a 200k reference, so a
+  40k smoke run and a 200k gate run both land near 0.64%. Letting prevalence
+  swing with `--n` would make AUC-PR incomparable between runs.

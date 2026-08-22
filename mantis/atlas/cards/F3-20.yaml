@@ -1,7 +1,7 @@
 id: F3-20
 name: Voice-clone authorised push payment fraud
 family: F3
-status: implemented
+status: mapped
 rails:
   - upi_p2p
   - upi_p2m
@@ -50,7 +50,6 @@ mitigations:
   - Impose a cooling-off period and confirmation step for first-time high-value payees.
   - Score beneficiary accounts on inbound fan-in from unrelated senders.
   - Surface a plain-language warning at the moment of payment, not in a policy document.
-generator: mantis.foundry.injectors.f3_20_voice_clone_app:inject
 detected_by:
   - L1
   - L2

@@ -1,7 +1,7 @@
 id: F1-02
 name: Intent-mandate scope inflation
 family: F1
-status: implemented
+status: mapped
 rails:
   - agentic
 actor: >-
@@ -49,7 +49,6 @@ mitigations:
   - Express category scope as an explicit MCC set rather than natural language, so "adjacent" has no room to mean anything.
   - Decrement a cumulative budget across the mandate lifetime, not just per transaction, to defeat salami inflation.
   - Require re-consent when the agent's plan leaves the originally scoped category.
-generator: mantis.foundry.injectors.f1_02_scope_inflation:inject
 detected_by:
   - L0
   - L1
