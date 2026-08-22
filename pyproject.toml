@@ -17,6 +17,11 @@ dependencies = [
     "pyyaml>=6.0",
     "numpy>=1.26",
     "pandas>=2.2",
+    # Parquet is the population interchange format between foundry and defense.
+    "pyarrow>=15.0",
+    # Calibration + fidelity figures. Imported lazily and guarded: a clone
+    # without it still generates the population and still prints the metrics.
+    "matplotlib>=3.8",
     "scipy>=1.11",
     "scikit-learn>=1.4",
     "lightgbm>=4.3",

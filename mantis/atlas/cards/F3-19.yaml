@@ -1,7 +1,7 @@
 id: F3-19
 name: Digital-arrest scam
 family: F3
-status: mapped
+status: implemented
 rails:
   - upi_p2p
   - upi_p2m

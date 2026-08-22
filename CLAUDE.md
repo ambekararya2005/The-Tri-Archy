@@ -194,9 +194,64 @@ When time runs out — and it will — sacrifice in **this order**, top first:
 ## 8. Current state
 
 - **Day 0 complete**: constitution, scaffold, frozen `TxEvent` schema, atlas
-  schema + loader, first 8 attack cards (F1-01, F1-02, F1-03, F1-09, F1-10,
-  F2-13, F3-19, F4-27), schema round-trip tests.
-- **Day 0 gate**: `python -m mantis.atlas.loader` prints the family summary and
-  `python -c "from mantis.core.events import TxEvent"` succeeds.
-- **Next up**: population simulator (`foundry/base/`), then injectors, then the
-  firewall. Do not start these before the day they are scheduled.
+  schema + loader, first 8 attack cards, schema round-trip tests.
+- **Day 1 complete**:
+  - **Atlas finished at 42 cards** (F1 12, F2 6, F3 8, F4 6, F5 5, F6 5), of
+    which **exactly 15 are `implemented`** and 27 are `mapped`. Every family has
+    at least one implemented card. `python -m mantis.atlas.loader` prints the
+    split under an "HONEST COUNT" heading; `tests/test_atlas.py` locks the
+    numbers so the writeup cannot drift from the repo.
+  - **Legitimate population simulator** in `mantis/foundry/base/`:
+    `reference.py` (calibration + Indian-market priors), `entities.py` (standing
+    customer/card/device/merchant/agent map), `simulator.py` (the draw),
+    `calibration.py` (metrics + figure), `__main__.py` (CLI).
+  - `scripts/fit_reference.py` fits shape parameters from the Kaggle Sparkov CSV
+    if one is dropped into `data/reference/`, and exits cleanly when none is.
+  - `mantis/core/paths.py` is the single repo-relative path helper (see §5).
+- **Day 1 gate (passing)**: `python -m mantis.foundry.base --n 200000 --seed 7`
+  writes `data/generated/population.parquet` (~15 MB, ~8 s) plus a manifest and
+  `docs/population_calibration.png`; amount KS 0.0051, hour TV 0.0066, MCC mix
+  max delta 0.0010; 42 cards load clean; 65 tests pass; ruff clean.
+- **Next up**: injectors (`foundry/injectors/`) for the 15 implemented cards,
+  then the fidelity scorecard, then the firewall. Do not start these before the
+  day they are scheduled.
+
+- **Day 1 audit complete** (`scripts/audit_population.py`, 30/30 checks). It is
+  adversarial by design and re-runnable: `python scripts/audit_population.py`.
+  It found and we fixed three real defects, all now pinned by regression tests:
+  1. **Reproducibility was broken.** A set of strings was iterated inside a loop
+     that consumes the RNG, so `--seed 7` produced a different population on
+     every process (CPython randomises string hashing). The numbers on the
+     slides would not have survived a judge re-running the pipeline.
+  2. **`device_id` was a perfect rail separator** (AUC 1.000, zero of 8,796
+     devices carried both rails). Agents now run on-device about half the time,
+     on the cardholder's existing hardware.
+  3. **Two more separators from over-clean modelling**: a binary adopter flag
+     gave 70% of customers a hard-zero agentic probability (`customer_id`
+     AUC 0.90 -> 0.75, now a graded Beta propensity), and the agentic 3DS mix
+     had no failure tail (`threeds_result` AUC 0.86 -> 0.75).
+
+### Day 1 decisions worth not relitigating
+
+- **Rail identity is unhideable, and that is fine.** `channel == "agentic"` names
+  the rail and every `ag_*` column is non-null exactly on it, so "can a model
+  detect the rail" is not a meaningful leakage test. The audit therefore tiers
+  columns: definitional (no bound), correlated-by-design (bound 0.85, each with
+  a written causal reason), and neutral (bound 0.70). `device_id` sits in tier 1
+  on reflection - a hosted agent runtime genuinely is a device that only ever
+  transacts agentically, and exposing that is what KYA is *for*. The test that
+  actually protects Day 2 is different and now runs: **amount must be
+  rail-independent given MCC** (worst per-MCC KS 0.076), so that once attacks
+  land - and attacks skew agentic - the detector cannot pass by learning
+  "unusual amount -> agentic -> fraud".
+- **F1-03 (refund-logic hijack) stays `mapped`.** Refunds are not representable
+  in the frozen schema, so it must not carry a generator path.
+- **Convention: `implemented` iff `generator` is set.** A `mapped` card names no
+  generator, because a path implies an injector that does not exist. Enforced by
+  `tests/test_atlas.py`.
+- **Legitimate agentic traffic has messy tails on purpose**: ~2.8% not
+  KYA-registered, ~0.3% consent signature invalid, `amount/scope_max` reaching
+  0.99. Without them L0 would score perfect recall on a generator artefact.
+- **Amount KS is non-zero by design** (round-number snapping) and the national
+  Zipf curve is flatter than the per-pool exponent (locality-conditioned
+  merchant choice). Both are explained on the figure rather than tuned away.

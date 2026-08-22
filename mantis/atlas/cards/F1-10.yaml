@@ -1,7 +1,7 @@
 id: F1-10
 name: Mandate replay and TTL abuse
 family: F1
-status: mapped
+status: implemented
 rails:
   - agentic
 actor: >-

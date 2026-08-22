@@ -1,7 +1,7 @@
 id: F2-13
 name: GenAI synthetic identity onboarding
 family: F2
-status: mapped
+status: implemented
 rails:
   - ecom
   - upi_p2m

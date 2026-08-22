@@ -154,6 +154,14 @@ def summary(cards: dict[str, AttackCard] | None = None) -> str:
         lines.append(f"   {flag} {card.id}  {card.name}")
     lines.append("")
     lines.append("  (* = injector implemented; others are mapped taxonomy only)")
+    lines.append("")
+    lines.append("  HONEST COUNT")
+    lines.append(f"    {len(source)} vectors mapped; {n_impl} of them have a working injector.")
+    lines.append(
+        f"    The remaining {len(source) - n_impl} are taxonomy: each carries observable signals"
+    )
+    lines.append("    and mitigations, but the foundry does not generate them. Never blur the")
+    lines.append("    two in a slide -- overclaiming coverage loses a technical room.")
     return "\n".join(lines)
 
 

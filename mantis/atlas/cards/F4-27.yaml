@@ -1,7 +1,7 @@
 id: F4-27
 name: Adaptive BIN attack
 family: F4
-status: mapped
+status: implemented
 rails:
   - ecom
   - agentic

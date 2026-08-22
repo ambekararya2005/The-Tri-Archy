@@ -1,7 +1,7 @@
 id: F1-01
 name: Cart-mandate tampering via indirect prompt injection
 family: F1
-status: mapped
+status: implemented
 rails:
   - agentic
   - ecom

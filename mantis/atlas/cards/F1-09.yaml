@@ -1,7 +1,7 @@
 id: F1-09
 name: Human-present spoofing for liability shift
 family: F1
-status: mapped
+status: implemented
 rails:
   - agentic
   - ecom
