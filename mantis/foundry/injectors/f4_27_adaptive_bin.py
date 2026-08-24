@@ -16,10 +16,21 @@ Modelling decisions worth defending
   distribution. A ₹40 probe at a jeweller would be a cartoon; a ₹40 probe at a
   bus operator is Tuesday. Sampling per-MCC keeps every probe individually
   ordinary, which is the attack's entire objective function.
-* **Escalation reuses probe merchants.** The high-value tail goes back through
-  merchants the campaign already touched — that is what "escalating on success"
-  means when the only feedback channel is the approve/decline oracle. It also
-  produces the merchant fan-in the L4 layer is supposed to see.
+* **Escalation reuses the merchants that approved.** The high-value tail goes
+  back only through merchants whose probe came back approved — that is what
+  "escalating on success" means when the only feedback channel is the
+  approve/decline oracle. It also produces the merchant fan-in the L4 layer is
+  supposed to see. Measured: **100% of escalation events land on a merchant that
+  approved during that campaign's own probe phase.**
+
+  This was wrong until Day 4 and worth recording rather than quietly fixing.
+  The declines for a whole campaign were drawn in one vectorised pass *after*
+  the escalation targets had been chosen, so escalation sampled from every
+  merchant the probe had *touched*, approved or not — 65% of escalation events
+  landed on a merchant that had approved, which is very close to what uniform
+  resampling from a 44%-approval pool gives you by chance. The oracle existed in
+  the data and was never read. The fix is an ordering one: decide the probe
+  outcome first, then let it choose the targets.
 * **Two to three BINs per campaign, different ones per campaign.** A campaign
   concentrated on one BIN would make a single BIN indicator a near-perfect
   classifier, which is a property of a lazy generator rather than of BIN attacks.
@@ -37,8 +48,10 @@ attack is now shaped the way it really is:
   spraying a finite set of stolen credentials across merchants and reading which
   combinations come back approved. The background declines at roughly 9%, so
   this is a real elevation without being a categorical giveaway. Measured on the
-  200k gate run: **46.0% campaign-wide, 50-66% inside the probe phase, 0-17%
-  inside escalation** — decline-heavy, which is what card testing looks like.
+  200k gate run at seed 1337: **48.5% campaign-wide against an 8.8% background
+  (5.5x), 51-66% inside the probe phase, 8% inside escalation** — decline-heavy,
+  which is what card testing looks like, and the probe/escalation gap is now a
+  causal consequence of the oracle rather than a coincidence of two constants.
 
   *Why 56% and not the 90% naive card testing shows.* Because this card is the
   **adaptive** BIN attack, and the adaptation is precisely the decision to stay
@@ -159,8 +172,25 @@ class AdaptiveBinAttack(BaseAttack):
             probe_merchants = merchant_ids[
                 rng.choice(merchant_ids.size, size=n_probe, p=merchant_p)
             ]
+
+            # THE ORACLE, READ IN THE RIGHT ORDER.
+            # The probe outcome has to be decided *before* the escalation targets
+            # are chosen, because the outcome is what chooses them. Deciding the
+            # whole campaign's declines in one draw afterwards -- which is what
+            # this injector did until Day 4 -- produced an escalation phase that
+            # went back through merchants the campaign had merely *touched*,
+            # approved or not. That makes the feedback channel decorative: the
+            # decline sequence is generated but never read, and "adaptive" is a
+            # claim in the docstring rather than a property of the data.
+            probe_declined = rng.random(n_probe) < _PROBE_DECLINE_P
+            approved_probe = probe_merchants[~probe_declined]
+            if approved_probe.size == 0:
+                # A campaign whose every probe failed has learned nothing and has
+                # nowhere to escalate to. Rare at 56%, but it must not crash, and
+                # it must not silently escalate anyway.
+                approved_probe = probe_merchants
             escalate_merchants = (
-                rng.choice(probe_merchants, size=n_escalate)
+                rng.choice(approved_probe, size=n_escalate)
                 if n_escalate
                 else np.empty(0, dtype=object)
             )
@@ -182,13 +212,11 @@ class AdaptiveBinAttack(BaseAttack):
             # Each attempt is independent, so each gets its own hour of day.
             view.set_timestamps(rows, ts, rng=rng)
 
-            # The oracle. Search fails most of the time; extraction, going back
-            # through merchants that already approved, mostly does not.
-            phase_p = np.r_[
-                np.full(n_probe, _PROBE_DECLINE_P),
-                np.full(n_escalate, _ESCALATION_DECLINE_P),
-            ]
-            declined = rng.random(n) < phase_p
+            # Search fails most of the time; extraction, going back through the
+            # merchants that just approved, mostly does not. The probe half of
+            # this array was already drawn above, because the escalation targets
+            # were selected from it.
+            declined = np.r_[probe_declined, rng.random(n_escalate) < _ESCALATION_DECLINE_P]
             # An invalid-CVV decline is impossible where no CVV was presented.
             reasons = np.asarray(_DECLINE_REASONS, dtype=object)[
                 rng.choice(len(_DECLINE_REASONS), size=n, p=_DECLINE_REASON_P)

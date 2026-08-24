@@ -103,7 +103,18 @@ GATE_AUC: Final[float] = 0.95
 #: error -- a genuinely rare slice is still the right denominator -- but a number
 #: measured against a few hundred rows must not be quoted as if it were measured
 #: against sixty thousand.
-THIN_SLICE_ROWS: Final[int] = 750
+#:
+#: Raised from 750 to 2,000 on Day 4. 750 was picked so that the one genuinely
+#: thin slice in the atlas (F1-03, agent-mediated refunds, ~620 rows at 200k)
+#: tripped it, which meant the threshold had been fitted to the case it was
+#: meant to judge. 2,000 is derived instead: a conditional AUC is a rank
+#: statistic whose standard error scales as roughly ``1/sqrt(min(n_pos, n_neg))``,
+#: and at ~2,000 negatives against ~100 positives the 95% interval on an AUC
+#: near 0.85 is about +/-0.06 -- wide, but narrow enough that the 0.95 gate
+#: means something. Below that the interval starts to straddle the gate, and a
+#: number that cannot distinguish "passes" from "fails" should not be quoted
+#: without the caveat printed next to it.
+THIN_SLICE_ROWS: Final[int] = 2_000
 
 #: The **only** columns a ``probe_slice`` may condition on.
 #:

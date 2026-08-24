@@ -305,8 +305,141 @@ When time runs out — and it will — sacrifice in **this order**, top first:
   — 15 injectors, prevalence 1.049%, every attack under the 0.95 separability
   gate *inside its declared slice*, 190 tests, ruff clean, 30/30 on the
   population audit. `make corpus` runs with no network.
-- **Next up**: the fidelity scorecard (`foundry/fidelity/`), then the firewall.
-  Do not start these before the day they are scheduled.
+- **Day 4 complete** — the defence core:
+  - **`mantis/defense/features/`**: 204 features in four groups — transaction,
+    velocity, entity, mandate. Velocity runs over a **keyed rolling state store**
+    (`state.py`), not a groupby: one forward pass, `bisect` + prefix sums per
+    window, bounded memory via eviction. **0.052 ms/row**, which is the number
+    Day 5's p99 budget is spent against.
+  - **A third leakage tier.** HARD RULE 1 names labels; `features/spec.py` adds
+    `POST_HOC_COLUMNS` and a new `FUTURE_COLUMNS` — `auth_response`, `settled`,
+    `settlement_lag_hours` **of the event being scored**. Those are the issuer's
+    own decision on this message and do not exist when the firewall runs.
+    Blocked by name, plus a derived-name check, asserted on every `transform`,
+    and `tests/test_features.py` fires all three tiers deliberately.
+  - **The decline-ratio windows the amendment made buildable**: per card, BIN,
+    merchant, device, over 1h/24h/7d. Plus refund-to-purchase ratios per customer
+    and merchant, merchant settlement-lag deviation from its rail's mode, and the
+    orphan-credit indicator.
+  - **`mantis/defense/l0_rules/`**: nine deterministic clauses, each returning a
+    named reason, with per-clause precision and FP rate printed. Every clause but
+    one fires on **0.000%** of legitimate agentic traffic; `kya_unregistered` sits
+    at 2.8% because the population carries that tail on purpose.
+  - **L1** (LightGBM, time-based split, isotonic-calibrated) and **L2**
+    (isolation forest, legitimate traffic only, asserted).
+  - **`mantis/defense/pool.py`**: five independently-generated worlds pooled,
+    identifiers namespaced per seed and calendars offset, so per-family positive
+    counts land at 550–4,150 instead of ~120.
+- **Day 4 gate (passing)**: `python -m mantis.defense` — 1,010,600 events,
+  10,600 fraud, time-split 707k/303k. **L1 AUC-PR 0.4910, recall@0.1%FPR
+  0.3615**; per rail, agentic 0.503 and classic 0.242. 225 tests, ruff clean.
+  Full table in `RESULTS.md`.
+- **Next up**: the fidelity scorecard (`foundry/fidelity/`), then L3/L4 and the
+  live console. Do not start these before the day they are scheduled.
+
+### Day 4 findings that change what we claim
+
+- **The leave-one-family-out result is strong, and only half the story we
+  wanted.** Held out of training, L1's mean per-family recall falls from
+  **30.8% to 10.5%** (F1 collapses 0.569 → 0.007). Supervised detection really
+  does collapse on attacks it has never seen, and that half is emphatic. But
+  **L2 does not rescue it**: 0.4% mean recall at the same operating point,
+  0.62 ROC. The honest claim is therefore the narrow one — L2's recall is
+  *unaffected* by whether an attack was in training, which is a property no
+  supervised layer has — and the layers that are supposed to close the gap
+  (L3 on provenance text, L4 on the graph) do not exist yet. Do not let the
+  writeup say "the unsupervised layer holds up". It does not, yet.
+- **Fusion is currently worse than L1 alone** (0.286 vs 0.362). Unweighted
+  noisy-OR gives a near-random L2 equal say, and at a fixed 0.1% FP budget that
+  costs real recall. The fix is weighted fusion fitted on train — Day 6's job,
+  not a coefficient to hand-tune now. **Quote L1's number, not the fused one.**
+- **L2's first design was broken by its own sentinel.** Filling NaN with -1e9
+  meant an Isolation Forest's random split threshold almost always landed in the
+  empty gap, so the trees isolated on the missingness pattern — i.e. on the rail
+  — instead of on behaviour. 109 of 204 features are >30% missing on legitimate
+  traffic. Filtering to dense columns and median-imputing took recall 0.0006 →
+  0.0054, a 7x improvement on a number that is still approximately zero. The
+  design rule is chosen on missingness alone and **never tuned against recall**,
+  because tuning it would make the layer supervised through the back door.
+- **`mnd_deliberation_residual_z` separates F1-01 at 0.99 AUC on its own** —
+  above the foundry's 0.95 gate, which never saw it because the gate probes
+  **raw columns** and this is a derived residual. Cause: `collapse_deliberation`
+  resamples latency from the low band *unconditionally*, so a ₹50,000 purchase
+  gets a ₹200 purchase's deliberation time. Ablated and reported: removing it
+  costs F1 only 0.569 → 0.549, so L1 is **not** leaning on it — but the gate has
+  a structural blind spot for derived features and that is worth fixing.
+- **F4-27's oracle was decorative until Day 4.** Declines for a whole campaign
+  were drawn in one pass *after* the escalation targets had been chosen, so the
+  attack escalated through merchants it had merely *touched* — 65% of escalation
+  events landed on an approving merchant, about what chance gives you. Reordered
+  so the probe outcome chooses the targets: now **100%**, with probe-phase
+  declines at 51-66% and escalation at 8% against an 8.8% background.
+- **`_as_bool` is why L0 tests must run in memory, not off parquet.** Written as
+  `v is True`, it silently failed on `numpy.bool_` (`np.True_ is True` is False),
+  firing `kya_unregistered` on 100% of the CLEAN attacks in memory and 0% after
+  a parquet round-trip. A test that only read the committed parquet would never
+  have found it.
+
+### The Day 3 bucket contract, checked against a real L0 — VERDICT
+
+Day 3 asserted CLEAN attacks trip zero clauses and HARD attacks fire one on
+>=25% of events, against a *provisional* L0. Measured against the real one:
+
+- **CLEAN holds, exactly.** F1-01 and F1-03 fire **0.00%** of nine clauses.
+- **F1-05 fails**: its best clause fires on **3%**, not 25%.
+
+**The contract is wrong, not L0** — and specifically, the Day 3 test had no
+false-positive term. It satisfied F1-05 with `delegation_depth > 2` and never
+priced it. Priced: `depth > 2` gets 64% recall at a **4.99% FP rate on legitimate
+agentic traffic** (1,498 events per 30,040). No issuer ships that, so it is not
+an L0 clause — it is a weak classifier with a rule's syntax. At `depth > 5`, the
+only threshold above the legitimate tail Day 3 deliberately widened, F1-05 fires
+on 3%. Four of the five HARD cards survive the omission because their clauses
+genuinely are free; F1-05 is the one where it was load-bearing, and its own
+docstring already conceded that "depth alone will not carry this card" and that
+the real answer is L4. **Neither side was adjusted to agree.** `tests/test_l0_rules.py`
+pins the exception so it stays noisy.
+
+- **`provenance_untrusted_domain` is implemented, measured, and switched OFF.**
+  It catches 100% of both CLEAN attacks at 0.00% FP — because the foundry draws
+  attacker URLs from twelve hosts that appear nowhere in legitimate traffic. That
+  is a partition the generator created, not a detection. It would also let L3
+  post a recall it had not earned by reading a word. Replaced by
+  `provenance_merchant_mismatch`, a real invariant: the trail must terminate at
+  the merchant that was paid.
+
+### Day 4 carry-over results (Task 0)
+
+- **Probe slices audited** (`scripts/audit_probe_slices.py`, `make slices`): all
+  legal, all proved to be a function of their declared columns alone, all
+  containing the whole attack. `THIN_SLICE_ROWS` raised 750 → **2,000** — the old
+  value had been fitted to the one case it was meant to judge. One thin slice:
+  **F1-03 at 620 rows**, flagged; quote its conditional AUC with its n attached.
+- **Distribution drift measured against a bootstrapped sampling-noise band**
+  (`scripts/drift_check.py`, `make drift`), 33 marginals, KS for continuous and
+  JSD for categorical. Everything inside its band except:
+  1. **`decline_reason` at 302x its band.** The reason-remapping (invalid_cvv →
+     do_not_honor where no CVV was presented, expired → insufficient_funds where
+     the mode cannot expire) is far larger than its comment claims: invalid_cvv
+     **0.130 → 0.036**, expired **0.080 → 0.033**. Only ~27% of declines are on a
+     CVV-bearing entry mode, so 73% of drawn invalid_cvv gets remapped.
+  2. **Realised decline rates run above the per-channel priors on every rail** —
+     moto **2.32x** (0.325 vs 0.140), upi_p2p 1.44x, ecom 1.33x, agentic 1.24x,
+     overall 0.088 vs a mix-weighted nominal 0.074. Cause: `decline_amount_tilt`
+     multiplies by `exp(0.55 z)`, whose expectation is `exp(0.55²/2) ≈ 1.16` —
+     Jensen, not redistribution. The tilt should be mean-preserving per channel.
+  Neither is fixed: both are conservative for detection (they make F4-27's lift
+  *smaller* against a higher background), and re-tuning the population on Day 4
+  would re-roll every pinned calibration number while the firewall was being
+  stood up. Both are Day 7 scorecard items.
+  Three measurement bugs in the *script* were found and fixed first: entity-drawn
+  columns (`merchant_country`, `card_bin`, `agent_platform`) need an
+  entity-level null band or Zipf popularity makes ordinary noise read as 339x
+  drift; the day-of-week target must be weighted by the calendar, since 90 days
+  is not a whole number of weeks; and the passive-human share must be
+  deconvolved from the cursor-entropy mixture rather than thresholded.
+  All three widened Day 3 tails verify: instant refunds 0.213 vs 0.24 on card
+  rails, passive humans 0.1153 vs 0.11, delegation depth>=4 0.0151 vs 0.0150.
 
 ### Outstanding, recorded rather than papered over
 

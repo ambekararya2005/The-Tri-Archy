@@ -54,6 +54,11 @@ select = ["E", "F", "I", "B", "UP", "N", "SIM", "RUF"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["E501"]
+# `X` for a feature matrix is the universal convention in ML code; lowercasing
+# it to satisfy pep8-naming would make these modules read worse, not better.
+"mantis/defense/l1_gbdt/*" = ["N803", "N806"]
+"mantis/defense/l2_novelty/*" = ["N803", "N806"]
+"mantis/defense/experiment.py" = ["N803", "N806"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
