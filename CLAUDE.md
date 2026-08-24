@@ -55,6 +55,8 @@ mantis/
   mantis/core/          events.py — THE schema, imported by everything
   mantis/atlas/         schema.py, loader.py, cards/*.yaml, discovery/
   mantis/foundry/       base/  injectors/  llm/  fidelity/
+                        llm/ = cache.py client.py fallback.py prompts.py
+                               corpus.py build.py  (3-stage, cache committed)
   mantis/defense/       features/ l0_rules/ l1_gbdt/ l2_novelty/
                         l3_text/ l4_graph/ fusion/ policy/ explain/
   mantis/loop/          evolutionary adversary + retrain harness
@@ -77,12 +79,16 @@ validated against the `Channel` enum). Nothing imports `api`. No cycles, ever.
 
 ---
 
-## 4. The event-schema contract — FROZEN
+## 4. The event-schema contract — FROZEN (v1.1.0)
 
 `mantis/core/events.py` is frozen as of Day 0. Every other module codes against
 it. **Do not add, rename, retype, or reorder a field** without doing all four
 of: updating `events.py`, updating `tests/test_schema.py`, updating this
 section, and grepping every `ag_` string literal in the repo.
+
+`SCHEMA_VERSION` records where we are: `1.0.0` is the Day 0 freeze, `1.1.0` is
+the Day 3 transaction-lifecycle amendment below. It goes into every dataset
+manifest, so a parquet can never be mistaken for one it is not.
 
 Additive-only escape hatch: if a new attack genuinely needs a field, add it to
 `AgenticContext` with a default of `None` so every existing call site keeps
@@ -101,10 +107,37 @@ working. Never repurpose an existing field's meaning.
 `tool_call_count`, `deliberation_latency_ms`, `cursor_entropy`,
 `dwell_time_ms`.
 
+**Transaction lifecycle** (Amendment 1.1.0, Day 3 — additive, all defaulted):
+`txn_type` (purchase/refund/reversal/preauth/credit, default purchase),
+`auth_response` (approved + five decline reasons, default approved),
+`original_event_id`, `dispute_outcome`, `dispute_raised_ts`, `settled` (default
+True), `settlement_lag_hours`.
+
+Why this **strengthens** criterion 5 rather than diluting it: every one of those
+is a field an issuer already holds. `txn_type` is ISO 8583 DE 3, `auth_response`
+is DE 39, `original_event_id` is the original-transaction reference an acquirer
+echoes on a credit, the dispute pair is ordinary chargeback case state, and the
+settlement pair is the gap between the authorisation and the clearing file.
+Day 0 modelling only the authorisation request was a **specification error**: it
+made F1-03 unrepresentable and left F4-27/F4-28 half-modelled, because the
+approve/decline oracle those attacks farm had nowhere to live.
+
+Amounts stay **non-negative on every type**. Direction is carried by `txn_type`,
+not by the sign, because that is how the wire does it and because a signed
+amount would silently break every quantile, KS distance and log-amount feature
+calibrated on Day 1.
+
 **Ground truth** (never a feature — see HARD RULES): `is_fraud`, `attack_id`,
 `attack_campaign`.
 
-Exports: `LABEL_COLUMNS`, `flatten(ev) -> dict` (agentic fields prefixed `ag_`).
+**Post-hoc** (`POST_HOC_COLUMNS`, never a *scoring* feature): `dispute_outcome`,
+`dispute_raised_ts`. They resolve days to months after the authorisation, so
+using them at scoring time is temporal leakage — the model would be reading the
+future. They are carried for evaluation, cost modelling and the console, and the
+feature builder must drop them alongside `LABEL_COLUMNS`.
+
+Exports: `SCHEMA_VERSION`, `LABEL_COLUMNS`, `POST_HOC_COLUMNS`,
+`DECLINE_RESPONSES`, `flatten(ev) -> dict` (agentic fields prefixed `ag_`).
 
 **`provenance_chain` is the highest-value field in the schema.** It is the
 ordered list of URLs / content the agent read before it decided to transact. It
@@ -241,8 +274,180 @@ When time runs out — and it will — sacrifice in **this order**, top first:
   AUC per attack: F2-13 0.639, F2-16 0.627, F3-19 0.872, F4-27 0.663,
   F4-28 0.801, F6-38 0.787, F6-39 0.792, F6-40 0.676; **all fraud combined
   0.609**. 102 tests pass; ruff clean.
+- **Day 3 complete**:
+  - **Schema amended to v1.1.0**, additively (see §4). Seven optional
+    lifecycle fields; every 1.0.0 call site unchanged; `tests/test_schema.py`
+    pins the first seventeen classic columns literally, so "additive" is
+    enforced rather than intended.
+  - **The population uses all of it**: a channel-dependent decline rate that
+    rises with the ticket (8.8% overall; card-present 2.8%, ecom 11.5%),
+    legitimate refunds and reversals **bound to real earlier purchases**,
+    pre-authorisation holds, orphan-free credits, a 9-basis-point dispute rate
+    that is post-hoc by construction, and settlement lag that is genuinely
+    **bimodal** — UPI clears in seconds, card rails on tomorrow's file.
+  - **`mantis/foundry/llm/`**: three-stage degradation (live Ollama → committed
+    disk cache → bundled deterministic corpus), cache keyed on
+    `sha256(model|prompt|params)`, standard library only. `generate()` cannot
+    fail, cannot hang, and opens no socket unless explicitly told it may.
+    234 artefacts (138 benign / 96 adversarial), 231 authored against a live
+    7B model, committed under `data/cache/`.
+  - **`ContentStore`** joins `ingested_content_ids` to that text. Two-tier:
+    explicit bindings for planted payloads, deterministic assignment into the
+    benign pool for everything else — so **every** id in the parquet resolves,
+    on attack rows and legitimate ones alike.
+  - **Seven agentic F1 injectors**, split HARD/CLEAN (see the decisions below):
+    F1-01 cart-mandate tampering, F1-02 intent-scope inflation, F1-03
+    refund-logic hijack, F1-04 category drift, F1-05 delegation laundering,
+    F1-09 human-present spoofing, F1-10 mandate replay.
+  - **The atlas ratchet moves 8 → 15**, and F1 is no longer an empty family.
+- **Day 3 gate (passing)**:
+  `python -m mantis.foundry --attacks all --out data/generated/dataset_v1.parquet --show-content`
+  — 15 injectors, prevalence 1.049%, every attack under the 0.95 separability
+  gate *inside its declared slice*, 190 tests, ruff clean, 30/30 on the
+  population audit. `make corpus` runs with no network.
 - **Next up**: the fidelity scorecard (`foundry/fidelity/`), then the firewall.
   Do not start these before the day they are scheduled.
+
+### Outstanding, recorded rather than papered over
+
+- **Day 2 cards under-declare their rails.** Writing
+  `test_attack_rails_agree_with_the_card` surfaced that several Day 2 injectors
+  clone whatever rail their source row was on and therefore ride rails their
+  card does not list — F2-13 reaches `card_present`, `recurring` and `upi_p2p`
+  against a card naming `agentic`/`ecom`/`upi_p2m`. The subset assertion is
+  therefore enforced for the Day 3 F1 cards only. Quietly widening seven Day 2
+  cards to make a new test pass would be the wrong way round; the reconciliation
+  is a Day 2 job that has not been done.
+- **The committed corpus was authored with `mistral:7b-instruct-q4_K_M`**, not
+  the `qwen2.5:7b` the plan named, because that is the model that was pulled
+  locally. `DEFAULT_MODEL` matches it deliberately: the cache key is a hash of
+  *(model, prompt, params)*, so a default that did not match the committed
+  entries would give a judge a cache miss on every prompt and a silent fall
+  through to the bundled corpus — HARD RULE 3 satisfied in letter, not in
+  substance. Switching is one line plus `--live --refresh` to re-author.
+
+### Day 3 decisions worth not relitigating
+
+- **The HARD/CLEAN split is the whole design, and it is asserted.** If every
+  agentic attack were a clean protocol violation, a Day 4 L0 rule would catch
+  all of them at near-zero FP, L1/L2 would have nothing to do on the rail the
+  project is about, and the ML story would collapse to "we wrote some
+  if-statements". So each F1 injector declares `bucket`, and
+  `tests/test_agentic_injectors.py` checks the *behaviour* against the
+  declaration: **CLEAN attacks (F1-01, F1-03) trip zero L0 clauses at zero
+  tolerance** — no scope violation, no expired mandate, no invalid signature, no
+  unregistered agent, no ceiling breach — while each HARD attack must fire a
+  deterministic clause on ≥25% of its events. Measured: F1-01 and F1-03 at
+  0.00 on every clause; F1-02 mcc-outside-scope 0.61, F1-09 invalid-consent
+  0.47, F1-10 expired 0.67 with 21 hash reuses.
+- **Two easy shapes were deliberately not generated for F1-03**, and saying so
+  matters more than generating them: an *orphan* credit (`txn_type='credit'`
+  with no `original_event_id`) and a credit routed to a different instrument.
+  Both are now representable and both are one-line L0 catches. Putting them in
+  the CLEAN exemplar would let it claim behavioural detection while drawing its
+  recall from L0.
+- **The probe now measures inside a declared definitional slice**
+  (`BaseAttack.probe_slice`). Some properties of an attack are its definition,
+  not evidence: every F1 attack carries an agentic block and only ~15% of the
+  file does, so *any* F1 injector scores ~0.92 on the nullity of *any* `ag_`
+  column before doing anything; F1-03 is a refund attack and refunds are ~2% of
+  traffic, so `txn_type=refund` alone scores 0.99. **The gate applies to the
+  conditional number**; the unconditional one is still printed so the change of
+  denominator is visible. This is the Day 1 "rail identity is unhideable"
+  decision applied consistently and declared per injector.
+- **Three population tails were widened because an attack would otherwise have
+  been free**, and each is defensible on its own terms:
+  1. `human_present_passive_share` (11%) — people who watch the agent work
+     without touching the device. Without it, *(human_present=True, machine-like
+     cursor entropy)* was a **perfect** detector for F1-09. It is now
+     **16.7% recall at 3.7% FP**, which is a real trade-off rather than a
+     generator artefact.
+  2. `refund_instant_share` (24%) — instant refunds are a real merchant
+     offering. Without it, F1-03 sat at **0.996** on `settlement_lag_hours`
+     alone; it is now 0.83.
+  3. `delegation_depth_weights` out to 5 — legitimate multi-agent orchestration
+     genuinely chains. Without it, `depth >= 4` was a perfect detector for
+     F1-05; it is now 0.94, still the closest number in the atlas to the gate,
+     and reported as such.
+- **Two generator artefacts the probe caught, both fixed at source.** Content
+  planting originally *extended* the provenance chain, making
+  `ag_provenance_chain_len` a 0.96 detector — an attack detectable by counting
+  URLs without reading one. Planting is now length-preserving. And
+  `collapse_deliberation` originally *added* to the cloned tool-call count,
+  pushing it past the legitimate maximum (0.96); it now resamples from the
+  background's own upper band, the same discipline as `draw_amounts`.
+- **F1-04 and F1-05 are written against the cards that exist, not the brief's
+  names.** The Day 3 plan called F1-04 "merchant-endpoint impersonation" and
+  F1-05 "vector-memory poisoning"; in the frozen atlas those ids are
+  *intent-mandate category drift* and *delegation-chain laundering*, and memory
+  poisoning is F5-36. Same principle as the four Day 2 remappings: an injector
+  that generates something other than what its card describes is exactly the
+  overclaim the registry assertion exists to prevent.
+- **F5 stays empty on purpose.** It is the zero-day holdout family — an attack
+  family the detector never trains on — and `tests/test_atlas.py` pins the
+  implemented-family set so that emptying or filling it is a deliberate act.
+
+### Day 3 review — four things checked afterwards, and what they found
+
+1. **F4-27 is not inverted; the *probe report* was.** Card testing's canonical
+   signature is an elevated decline ratio, and the injector produces one:
+   **46.0% campaign-wide against a 9.0% background (5.1x), 50-66% inside the
+   probe phase, 0-17% inside escalation.** What was wrong was the reporting. The
+   probe takes `max(a, 1-a)` per feature, so the magnitude is **direction-blind**
+   — `auth_response=approved 0.69` reads as "approved more often" when the truth
+   is the exact reverse. Every probe row now carries `direction` (`hi`/`lo`) and
+   the table prints it, because a Day 4 model trained off a misread table would
+   learn card testing with the sign flipped. Same fix, same reason, as the
+   `is_fraud`-never-a-feature rule: make the mistake impossible to make quietly.
+
+2. **The probe slice is now audited mechanically, not declared.** The rule:
+   *a slice may condition only on facts a detector knows before it scores, and
+   which are not a consequence of the attack.* Enforced three ways in
+   `tests/test_probe_slices.py` — declared columns must be on
+   `probe.SLICE_ALLOWED_COLUMNS` (rail, processing code, category; **not**
+   amount, auth_response, or any `ag_scope_*`/behavioural column); the returned
+   mask is proved to be a **function of the declared columns alone** by grouping
+   the background on them and asserting the mask is constant inside every group;
+   and the slice must contain every attack row, so it cannot cherry-pick. A
+   slice of "agentic AND provenance_len > 3" fails the second check whatever it
+   declares. Slices in use: F1-* on `ag_agent_id` nullity, F1-03 on that plus
+   `txn_type`.
+
+3. **The slice denominator is printed, and thin ones are flagged.** F1-03's
+   slice is agent-mediated refunds — genuinely small (~140 rows at 40k, ~700 at
+   200k), so its 0.83 is a fragile number. The table now prints `slice n` and
+   marks anything under 750 rows with `!`. The number is surfaced rather than
+   engineered away, because refunds *being* rare is a fact about refunds.
+
+4. **Cumulative calibration drift is ~nil, and now pinned by a test.** Between
+   Day 1 and Day 3 the population gained declines, refunds, reversals, pre-auths,
+   credits, bimodal settlement, a passive-human tail, instant refunds and a
+   deeper delegation tail — three of them added specifically to make attacks
+   harder. Measured at 200k: amount KS **0.0051 → 0.0062**, hour-of-day TV
+   **0.0066 → 0.0051** (improved), MCC mix max delta 0.0010 → 0.0011, median
+   ticket ₹782 → ₹782.62. The audit passes **30/30**, with every new lifecycle
+   column included and under its tier bound (worst: `settlement_lag_hours` at
+   0.62 against a 0.70 neutral bound). Drift is that small because refunds and
+   reversals are **conversions** of rows that would otherwise have been
+   purchases, copying `(mcc, amount)` from a real earlier row — a conversion
+   drawn from the population preserves its marginals. `test_population.py` now
+   pins the three distances so Day 7's scorecard cannot be a surprise.
+
+### The number to state before a judge derives it
+
+**Fraud is concentrated on the agentic rail, heavily and by design.** At the
+Day 3 gate: agent-mediated traffic is **15.4% of volume and carries 51% of the
+fraud** — 3.48% prevalence against 0.61% classic, a **5.7x concentration**.
+
+That is defensible and is the project's thesis in one number: a new rail with
+immature controls is where attackers go. But it has a consequence that must be
+said out loud rather than discovered: **the presence of an agentic block is by
+itself a strong predictor of fraud in this file**, and any model will lean on
+it. So the Day 4 firewall must report **recall@0.1%FPR within each rail** as
+well as overall — a headline number computed across both rails is partly
+measuring "is this agentic", which an issuer already reads free off the
+authorisation message. `python -m mantis.foundry` prints this block on every
+run and records it in the manifest.
 
 - **Day 1 audit complete** (`scripts/audit_population.py`, 30/30 checks). It is
   adversarial by design and re-runnable: `python scripts/audit_population.py`.

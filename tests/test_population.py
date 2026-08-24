@@ -23,13 +23,29 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from mantis.core.events import AGENTIC_COLUMNS, ALL_COLUMNS, LABEL_COLUMNS, Channel, MandateType
+from mantis.core.events import (
+    AGENTIC_COLUMNS,
+    ALL_COLUMNS,
+    DECLINE_RESPONSES,
+    LABEL_COLUMNS,
+    AuthResponse,
+    Channel,
+    DisputeOutcome,
+    MandateType,
+    TxnType,
+)
 from mantis.foundry.base.calibration import calibration_report
 from mantis.foundry.base.entities import MAX_CARDS, MAX_DEVICES, build_population
 from mantis.foundry.base.reference import ReferenceStats, load_reference_stats
 from mantis.foundry.base.simulator import SimulationConfig, iter_events, simulate_frame
 
 SMALL = SimulationConfig(n_events=4_000, seed=7, n_customers=400, n_merchants=900)
+
+#: Some of what this population models is thin on purpose -- a 0.3% invalid-consent
+#: tail, a 9-basis-point dispute rate. At 4,000 events those are single-digit row
+#: counts and a test on them measures the RNG, not the model. WIDE exists so the
+#: rare tails can be asserted on at a sample size where they mean something.
+WIDE = SimulationConfig(n_events=25_000, seed=11, n_customers=1_200, n_merchants=3_000)
 
 
 @pytest.fixture(scope="module")
@@ -41,6 +57,12 @@ def stats() -> ReferenceStats:
 def frame(stats: ReferenceStats) -> pd.DataFrame:
     """One modest population, reused across the module. Generation is not free."""
     return simulate_frame(SMALL, stats)
+
+
+@pytest.fixture(scope="module")
+def wide_frame(stats: ReferenceStats) -> pd.DataFrame:
+    """A larger population, for the tails and the transaction lifecycle."""
+    return simulate_frame(WIDE, stats)
 
 
 # --------------------------------------------------------------------------- #
@@ -239,7 +261,11 @@ def test_legitimate_mandates_actually_cover_their_purchase(frame: pd.DataFrame) 
     assert (age > 0).all(), "mandate issued after the authorisation it authorised"
     assert (age < ag["ag_mandate_ttl_seconds"]).all(), "mandate expired before use"
 
-    assert ag["ag_delegation_depth"].max() <= 3
+    # Five, not three. The tail was widened on Day 3: a hard cap at three made
+    # "depth >= 4" a perfect detector for F1-05, which would have been a fact
+    # about this generator rather than about delegation laundering.
+    assert ag["ag_delegation_depth"].max() <= 5
+    assert ag["ag_delegation_depth"].min() >= 1
     assert ag["ag_provenance_chain"].map(len).min() >= 2
 
 
@@ -251,14 +277,17 @@ def test_legitimate_spend_approaches_the_mandate_ceiling(frame: pd.DataFrame) ->
     assert ratio.median() > 0.4
 
 
-def test_l0_flags_are_not_perfect_separators(frame: pd.DataFrame) -> None:
+def test_l0_flags_are_not_perfect_separators(wide_frame: pd.DataFrame) -> None:
     """A legitimate tail is unregistered / unverified, on purpose.
 
     If every legitimate agent were KYA-registered, ``kya_unregistered`` alone
     would score perfect recall on a generator artefact rather than on anything
     real. See modelling choice 1 in the simulator docstring.
+
+    Measured on the wide fixture: the invalid-consent tail is 0.3%, so on the
+    small one this asserts on a handful of rows and fails on the RNG.
     """
-    ag = frame[frame["channel"] == Channel.AGENTIC.value]
+    ag = wide_frame[wide_frame["channel"] == Channel.AGENTIC.value]
     assert 0.0 < (~ag["ag_kya_registered"].astype(bool)).mean() < 0.10
     assert 0.0 < (~ag["ag_consent_sig_valid"].astype(bool)).mean() < 0.05
 
@@ -287,6 +316,132 @@ def test_agentic_rail_uses_agent_tokens_only(frame: pd.DataFrame) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# The transaction lifecycle (schema amendment 1.1.0)
+# --------------------------------------------------------------------------- #
+
+
+def test_every_transaction_type_appears(wide_frame: pd.DataFrame) -> None:
+    """A txn_type level absent from the background is a free label.
+
+    If, say, no legitimate event were ever a ``credit``, then any injector that
+    emitted one would be perfectly separable on a single categorical level, and
+    the separability probe would be measuring our laziness.
+    """
+    present = set(wide_frame["txn_type"])
+    assert present == {t.value for t in TxnType}
+
+
+def test_decline_rate_is_realistic_and_channel_dependent(wide_frame: pd.DataFrame) -> None:
+    """The approve/decline oracle F4-27 farms has to actually exist."""
+    declined = wide_frame["auth_response"] != AuthResponse.APPROVED.value
+    assert 0.04 < declined.mean() < 0.16, "overall decline rate is not plausible"
+
+    by_channel = declined.groupby(wide_frame["channel"]).mean()
+    # Card-present is the cleanest rail; card-not-present is the expensive one.
+    assert by_channel["card_present"] < by_channel["ecom"]
+    # Every decline reason must occur, or the reason column is half-decorative.
+    assert set(wide_frame.loc[declined, "auth_response"]) == set(DECLINE_RESPONSES)
+
+
+def test_decline_reasons_are_possible_for_the_credential(wide_frame: pd.DataFrame) -> None:
+    """No impossible combinations. A model will memorise one; a judge will spot it."""
+    declined = wide_frame[wide_frame["auth_response"] != AuthResponse.APPROVED.value]
+    cvv = declined[declined["auth_response"] == AuthResponse.DECLINED_INVALID_CVV.value]
+    assert (cvv["entry_mode"] == "ecom_keyed").all(), "CVV decline on a credential with no CVV"
+
+    expired = declined[declined["auth_response"] == AuthResponse.DECLINED_EXPIRED.value]
+    assert expired["entry_mode"].isin({"ecom_keyed", "credential_on_file", "magstripe"}).all()
+
+
+def test_declines_never_settle(wide_frame: pd.DataFrame) -> None:
+    """Enforced by the schema; asserted here because the generator could still lie."""
+    declined = wide_frame[wide_frame["auth_response"] != AuthResponse.APPROVED.value]
+    assert not declined["settled"].any()
+    assert declined["settlement_lag_hours"].isna().all()
+    unsettled = wide_frame[~wide_frame["settled"].astype(bool)]
+    assert unsettled["settlement_lag_hours"].isna().all()
+
+
+def test_settlement_lag_is_bimodal_across_rails(wide_frame: pd.DataFrame) -> None:
+    """UPI clears in seconds, cards clear tomorrow.
+
+    This is load-bearing for F1-03: if every legitimate rail settled in a day,
+    an instant-settling refund would be separable on one column and the attack
+    would be a cartoon.
+    """
+    lag = wide_frame.groupby("channel")["settlement_lag_hours"].median()
+    assert lag["upi_p2m"] < 1.0
+    assert lag["card_present"] > 12.0
+    assert lag["ecom"] > 12.0
+
+
+def test_refunds_are_bound_to_a_real_earlier_purchase(wide_frame: pd.DataFrame) -> None:
+    """A refund is the same relationship running backwards, not a fresh event."""
+    refunds = wide_frame[wide_frame["txn_type"].isin(["refund", "reversal"])]
+    assert len(refunds) > 50
+
+    by_id = wide_frame.set_index("event_id")
+    linked = refunds[refunds["original_event_id"].notna()]
+    assert len(linked) == len(refunds), "every refund/reversal must name its purchase"
+    assert linked["original_event_id"].isin(by_id.index).all()
+
+    source = by_id.loc[linked["original_event_id"]]
+    assert (source["txn_type"] == "purchase").to_numpy().all()
+    # Same customer, same merchant, same rail: this is a return, not a new sale.
+    assert (source["customer_id"].to_numpy() == linked["customer_id"].to_numpy()).all()
+    assert (source["merchant_id"].to_numpy() == linked["merchant_id"].to_numpy()).all()
+    assert (source["channel"].to_numpy() == linked["channel"].to_numpy()).all()
+    # Never more than was paid, and never before it was paid.
+    assert (linked["amount"].to_numpy() <= source["amount"].to_numpy() + 0.01).all()
+    assert (linked["ts"].to_numpy() > source["ts"].to_numpy()).all()
+
+
+def test_refunds_ride_every_rail_including_agentic(wide_frame: pd.DataFrame) -> None:
+    """Otherwise 'agentic AND refund' would be a free deterministic rule for F1-03."""
+    refunds = wide_frame[wide_frame["txn_type"] == "refund"]
+    share = (refunds["channel"] == Channel.AGENTIC.value).mean()
+    assert 0.05 < share < 0.35, f"agentic share of legitimate refunds is {share:.3f}"
+
+
+def test_reversals_never_clear(wide_frame: pd.DataFrame) -> None:
+    reversals = wide_frame[wide_frame["txn_type"] == "reversal"]
+    assert len(reversals) > 5
+    assert not reversals["settled"].any()
+
+
+def test_disputes_are_basis_points_and_post_hoc(wide_frame: pd.DataFrame) -> None:
+    """Disputes resolve after the fact. They are evaluation data, never features."""
+    disputed = wide_frame[wide_frame["dispute_outcome"].notna()]
+    assert 0 < len(disputed) < 0.01 * len(wide_frame)
+    assert (disputed["dispute_raised_ts"] > disputed["ts"]).all()
+    assert disputed["settled"].all()
+    assert (disputed["txn_type"] == "purchase").all()
+    # Some are still open. A file where every dispute has resolved is a file
+    # from the future.
+    assert (disputed["dispute_outcome"] == DisputeOutcome.RAISED.value).any()
+
+    undisputed = wide_frame[wide_frame["dispute_outcome"].isna()]
+    assert undisputed["dispute_raised_ts"].isna().all()
+
+
+def test_human_present_has_a_passive_tail(wide_frame: pd.DataFrame) -> None:
+    """F1-09 must not be catchable by one deterministic rule.
+
+    A share of genuinely supervised sessions have machine-like telemetry -- the
+    person is watching, not touching. Without this tail, (human_present=True,
+    low cursor_entropy) would separate spoofing perfectly, and we would be
+    reporting a property of this generator rather than of the attack.
+    """
+    ag = wide_frame[wide_frame["channel"] == Channel.AGENTIC.value]
+    watched = ag[ag["ag_human_present"].astype(bool)]
+    unwatched = ag[~ag["ag_human_present"].astype(bool)]
+
+    floor = unwatched["ag_cursor_entropy"].quantile(0.75)
+    passive = (watched["ag_cursor_entropy"] <= floor).mean()
+    assert 0.03 < passive < 0.25, f"passive-human tail is {passive:.3f}"
+
+
+# --------------------------------------------------------------------------- #
 # Calibration
 # --------------------------------------------------------------------------- #
 
@@ -302,6 +457,86 @@ def test_population_tracks_its_own_reference(frame: pd.DataFrame, stats: Referen
     assert report["hour_total_variation"] < 0.06
     assert report["mcc_mix_max_abs_delta"] < 0.02
     assert 0.5 < report["zipf_exponent_realised"] < 1.5
+
+
+#: Calibration measured on the 200k gate run, recorded so drift is visible as a
+#: number rather than as a feeling. Day 1 is the population before the Day 3
+#: lifecycle work; Day 3 is after it.
+#:
+#:     metric                    Day 1     Day 3
+#:     amount KS distance        0.0051    0.0062
+#:     hour-of-day TV distance   0.0066    0.0051
+#:     mcc mix max |delta|       0.0010    0.0011
+#:     per-MCC median max |rel|  --        0.039
+#:     median ticket (INR)       782       782.62
+#:
+#: Between those two runs the population gained a decline rate, refunds,
+#: reversals, pre-auths, credits, bimodal settlement lag, a passive-human
+#: telemetry tail, legitimate instant refunds and a deeper delegation tail --
+#: three of which were added specifically to stop an attack being detectable on
+#: one column. The drift is ~0.001 on amount and *negative* on hour-of-day.
+#:
+#: It is that small for a design reason worth restating: refunds and reversals
+#: are **conversions of rows that would otherwise have been purchases**, and they
+#: copy their (mcc, amount) from a real earlier row. A conversion drawn from the
+#: population preserves the population's marginals in distribution; only the
+#: partial-refund fraction moves anything, and it moves ~0.7% of rows.
+DRIFT_BOUNDS = {
+    "amount_ks_distance": 0.030,
+    "hour_total_variation": 0.045,
+    "mcc_mix_max_abs_delta": 0.015,
+}
+
+
+def test_lifecycle_work_did_not_drift_the_population_off_its_reference(
+    wide_frame: pd.DataFrame, stats: ReferenceStats
+) -> None:
+    """The Day 7 fidelity scorecard is a scored deliverable. Find drift now.
+
+    Three of the Day 3 population changes exist to make attacks harder to
+    detect, and each is defensible alone. Nobody would notice if their
+    *cumulative* effect had quietly pulled the population away from the
+    reference — until the fidelity scorecard printed it in front of a judge.
+
+    Bounds are tighter than ``test_population_tracks_its_own_reference`` because
+    this runs on the 25k fixture rather than the 4k one, and looser than the
+    200k gate figures because 25k is still small. What they catch is a *regime*
+    change, not sampling noise.
+    """
+    report = calibration_report(wide_frame, stats)
+    for metric, bound in DRIFT_BOUNDS.items():
+        assert report[metric] < bound, (
+            f"{metric} = {report[metric]:.4f} exceeds {bound}; the population has drifted "
+            "off its reference. Check what the last population change cost."
+        )
+
+
+def test_the_conversion_trick_preserved_the_category_mix(wide_frame: pd.DataFrame) -> None:
+    """Refunds must not have shifted which categories the file is made of.
+
+    A refund copies its category from the purchase it reverses, so removing
+    every refund and reversal should leave the MCC mix essentially unchanged.
+    If it did not, refunds would be concentrated somewhere and the Day 7
+    scorecard would show a category the reference does not have.
+    """
+    purchases = wide_frame[wide_frame["txn_type"] == "purchase"]
+    mix_all = wide_frame["mcc"].value_counts(normalize=True)
+    mix_purchases = purchases["mcc"].value_counts(normalize=True)
+    delta = (mix_all - mix_purchases).abs().max()
+    assert delta < 0.01, f"removing non-purchases shifts the MCC mix by {delta:.4f}"
+
+
+def test_amount_marginal_survives_the_refund_population(wide_frame: pd.DataFrame) -> None:
+    """Partial refunds are the only thing that moves the amount distribution.
+
+    They return 15-92% of the original on ~32% of refunds, which is ~0.7% of the
+    file. This asserts the effect stays that size: a median that moved would
+    mean the conversion approach had stopped preserving the marginal.
+    """
+    purchases = wide_frame[wide_frame["txn_type"] == "purchase"]["amount"]
+    everything = wide_frame["amount"]
+    shift = abs(everything.median() - purchases.median()) / purchases.median()
+    assert shift < 0.05, f"non-purchase rows move the median ticket by {shift:.1%}"
 
 
 def test_events_are_ordered_and_inside_the_window(frame: pd.DataFrame) -> None:

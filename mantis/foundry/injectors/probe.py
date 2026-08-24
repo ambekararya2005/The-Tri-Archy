@@ -19,6 +19,14 @@ How the probe is deliberately adversarial
   depth-1 stump, and the column's own rank AUC (``max(a, 1 - a)``). A stump
   optimises gini, not AUC, so a column can separate better than its stump does.
   Taking the max means we cannot flatter ourselves by accident.
+* Because it takes ``max(a, 1 - a)``, the magnitude alone is **direction-blind**,
+  and that is actively dangerous: ``auth_response=approved`` at 0.69 reads as
+  "this attack is approved more often" when the truth is the exact opposite, and
+  card testing's canonical signature is an *elevated decline ratio*. So every
+  row also carries ``direction`` — ``hi`` when the attack sits high on the
+  feature, ``lo`` when it sits low — and the table prints it. A reviewer who
+  reads only the magnitude can get the sign of a feature backwards; a Day 4
+  model trained on a misread table would learn card testing inverted.
 * Categorical columns are exploded to **one indicator per level**, so
   "``mcc`` is 6012" is probed on its own rather than hidden inside a nominal
   column a tree cannot split sensibly.
@@ -39,7 +47,31 @@ by construction. Excluding the raw ids makes this probe harder to pass, not
 easier: it removes the shortcut and leaves only the columns an attack could
 plausibly betray itself on.
 
-Label columns are excluded for the obvious reason (HARD RULE 1).
+Label columns are excluded for the obvious reason (HARD RULE 1). So are the two
+post-hoc dispute columns: they resolve weeks after the authorisation, so a
+detector that used them would be reading the future, and a probe that measured
+them would be reporting a number no deployed model could reproduce.
+
+Why there is a second AUC column, and which one the gate uses
+--------------------------------------------------------------
+Some properties of an attack are its **definition**, not evidence of it. Every
+F1 attack carries an agentic block and only ~15% of the background does, so any
+F1 injector scores ~0.92 on the nullity of any ``ag_`` column before it does
+anything. F1-03 is a refund attack and refunds are ~2% of traffic, so
+``txn_type=refund`` alone scores ~0.99. Neither number means the attack is easy
+to catch; both mean it happens where we already said it happens.
+
+So an injector may declare a **definitional slice** of the background it should
+be measured inside — :meth:`BaseAttack.probe_slice` — and this module reports
+``slice_auc`` alongside ``best_auc``. **The gate applies to ``slice_auc``
+whenever a slice is declared**, because "among refunds by agent-mediated
+customers, does one column give this away?" is the question an issuer actually
+faces. The unconditional number stays in the table so the denominator change is
+visible rather than quiet.
+
+This is the same reasoning the Day 1 audit reached about the rail (CLAUDE.md:
+"rail identity is unhideable, and that is fine"), applied consistently and
+declared per injector rather than special-cased here.
 """
 
 from __future__ import annotations
@@ -49,12 +81,15 @@ from typing import Final
 import numpy as np
 import pandas as pd
 
-from mantis.core.events import LABEL_COLUMNS
+from mantis.core.events import LABEL_COLUMNS, POST_HOC_COLUMNS
 
 __all__ = [
     "EXCLUDED_COLUMNS",
     "GATE_AUC",
+    "SLICE_ALLOWED_COLUMNS",
+    "THIN_SLICE_ROWS",
     "build_probe_matrix",
+    "build_slices",
     "format_probe_table",
     "probe_attack",
     "probe_report",
@@ -63,6 +98,48 @@ __all__ = [
 #: The bar an injector has to clear. Above this, the attack announces itself on
 #: one column and is not worth generating.
 GATE_AUC: Final[float] = 0.95
+
+#: Below this many background rows, a conditional AUC is flagged as thin. Not an
+#: error -- a genuinely rare slice is still the right denominator -- but a number
+#: measured against a few hundred rows must not be quoted as if it were measured
+#: against sixty thousand.
+THIN_SLICE_ROWS: Final[int] = 750
+
+#: The **only** columns a ``probe_slice`` may condition on.
+#:
+#: A slice narrows the population an attack is graded against, so an injector
+#: choosing its own slice is marking its own homework unless the choice is
+#: constrained. The rule that makes it legitimate: *a slice may condition only
+#: on facts a detector already knows before it scores, and which are not
+#: consequences of the attack.*
+#:
+#: Rail and processing code qualify -- a deployed detector genuinely does branch
+#: on "is this an agent-mediated authorisation" and "is this a credit going
+#: out", and grading an agentic attack against card-present traffic measures the
+#: rail rather than the attack. Everything else does not. Slicing F1-01 to
+#: "agentic" is fair; slicing it to "agentic and provenance chain longer than
+#: three" would be conditioning on the attack's own footprint, and the AUC that
+#: came back would be meaningless.
+#:
+#: Deliberately absent, and worth naming: ``amount`` (an attack chooses it),
+#: ``auth_response`` and ``settled`` (the issuer's decision on *this* message,
+#: unknown at scoring time), every ``ag_scope_*``, ``ag_mandate_*`` and
+#: behavioural ``ag_*`` column (all attack footprint), and the label and
+#: post-hoc columns.
+SLICE_ALLOWED_COLUMNS: Final[frozenset[str]] = frozenset(
+    {
+        "channel",
+        "entry_mode",
+        "txn_type",
+        "mcc",
+        "currency",
+        "merchant_country",
+        # Read for its nullity only: "does this authorisation carry an agentic
+        # block at all". That is rail identity, which Day 1 settled is
+        # unhideable and definitional.
+        "ag_agent_id",
+    }
+)
 
 #: Identifier columns, excluded with reasons. See the module docstring.
 EXCLUDED_COLUMNS: Final[dict[str, str]] = {
@@ -78,16 +155,26 @@ EXCLUDED_COLUMNS: Final[dict[str, str]] = {
     "ag_mandate_hash": "digest; replay detection is a cross-row join, not a column",
     "ag_mandate_issued_ts": "probed as mandate age relative to the event",
     "ts": "probed as epoch, hour of day and day of week",
+    "original_event_id": "identifier; probed instead through its null pattern",
+    "dispute_raised_ts": "post-hoc, and probed as a lag; see POST_HOC_COLUMNS",
     **{c: "ground truth; HARD RULE 1" for c in LABEL_COLUMNS},
+    **{
+        c: "resolves weeks after authorisation; using it would be temporal leakage"
+        for c in POST_HOC_COLUMNS
+    },
 }
 
-#: Columns whose null pattern is itself worth probing.
+#: Columns whose null pattern is itself worth probing. ``original_event_id`` is
+#: here because an *orphan* credit -- money going out with no purchase behind it
+#: -- is the F1-03 signal, and the probe has to be able to see it.
 _NULLITY_COLUMNS: Final[tuple[str, ...]] = (
     "terminal_id",
     "device_id",
     "ip",
     "lat",
     "ag_agent_id",
+    "original_event_id",
+    "settlement_lag_hours",
 )
 
 #: List-valued columns, probed by length.
@@ -163,20 +250,39 @@ def build_probe_matrix(frame: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(out, index=frame.index)
 
 
-def _stump_auc(x: np.ndarray, y: np.ndarray) -> float:
-    """The stronger of a gini-optimal depth-1 stump and the column's rank AUC."""
+def _fold(auc: float) -> tuple[float, str]:
+    """Collapse a signed AUC to (magnitude, direction).
+
+    ``hi`` means the attack sits **high** on this feature relative to the
+    comparison population; ``lo`` means it sits low. Keeping the direction is
+    what stops a reader inferring the sign of a feature from its name.
+    """
+    return (auc, "hi") if auc >= 0.5 else (1.0 - auc, "lo")
+
+
+def _stump_auc(x: np.ndarray, y: np.ndarray) -> tuple[float, str]:
+    """The stronger of a gini-optimal depth-1 stump and the column's rank AUC.
+
+    Returns the magnitude **and** which way the attack sits. See the module
+    docstring: the magnitude on its own is direction-blind, and a
+    direction-blind table is how ``auth_response=approved`` gets misread as
+    "approved more often" when it means the reverse.
+    """
     from sklearn.metrics import roc_auc_score
     from sklearn.tree import DecisionTreeClassifier
 
     if np.unique(x).size < 2:
-        return 0.5
-    rank = float(roc_auc_score(y, x))
-    rank = max(rank, 1.0 - rank)
+        return 0.5, "hi"
+    rank_value, rank_direction = _fold(float(roc_auc_score(y, x)))
 
     stump = DecisionTreeClassifier(max_depth=1, random_state=0)
     stump.fit(x.reshape(-1, 1), y)
-    fitted = float(roc_auc_score(y, stump.predict_proba(x.reshape(-1, 1))[:, 1]))
-    return max(rank, max(fitted, 1.0 - fitted))
+    fitted_value, fitted_direction = _fold(
+        float(roc_auc_score(y, stump.predict_proba(x.reshape(-1, 1))[:, 1]))
+    )
+    if fitted_value > rank_value:
+        return fitted_value, fitted_direction
+    return rank_value, rank_direction
 
 
 def probe_attack(
@@ -197,7 +303,9 @@ def probe_attack(
         seed: Subsampling seed.
 
     Returns:
-        A frame of ``feature`` / ``auc``, sorted worst-first (most separating).
+        A frame of ``feature`` / ``auc`` / ``direction``, sorted worst-first
+        (most separating). ``direction`` is ``hi`` when the attack sits high on
+        the feature and ``lo`` when it sits low.
     """
     negatives = background
     if max_negatives is not None and len(background) > max_negatives:
@@ -207,9 +315,9 @@ def probe_attack(
     labels = np.r_[np.zeros(len(negatives)), np.ones(len(attack))]
     matrix = build_probe_matrix(combined)
 
-    scores = [(name, _stump_auc(matrix[name].to_numpy(), labels)) for name in matrix.columns]
+    scores = [(name, *_stump_auc(matrix[name].to_numpy(), labels)) for name in matrix.columns]
     return (
-        pd.DataFrame(scores, columns=["feature", "auc"])
+        pd.DataFrame(scores, columns=["feature", "auc", "direction"])
         .sort_values("auc", ascending=False)
         .reset_index(drop=True)
     )
@@ -221,46 +329,120 @@ def probe_report(
     *,
     max_negatives: int | None = 60_000,
     top_k: int = 3,
+    slices: dict[str, np.ndarray] | None = None,
 ) -> pd.DataFrame:
     """Best-single-feature AUC per attack, plus the runners-up.
 
     The combined ``ALL`` row is measured against every attack row at once, which
     is the number that matters for the dataset as a whole.
+
+    Args:
+        background: The clean population.
+        attacks: ``card_id -> attack frame``.
+        max_negatives: Background subsample size; AUC is rank-based.
+        top_k: How many runners-up to record.
+        slices: ``card_id -> boolean mask over ``background``` naming the
+            definitional slice that attack should be measured inside. Built from
+            :meth:`BaseAttack.probe_slice`; see the module docstring for why the
+            gate then applies to the conditional number.
     """
     rows: list[dict[str, object]] = []
+    slices = slices or {}
     everything = pd.concat(list(attacks.values()), ignore_index=True)
+
     for card_id, frame in [*attacks.items(), ("ALL", everything)]:
         ranked = probe_attack(background, frame, max_negatives=max_negatives)
         best = ranked.iloc[0]
+
+        slice_auc: float | None = None
+        slice_feature: str | None = None
+        slice_direction: str | None = None
+        slice_n: int | None = None
+        mask = slices.get(card_id)
+        if mask is not None and bool(mask.any()):
+            negatives = background[mask]
+            slice_n = len(negatives)
+            sliced = probe_attack(negatives, frame, max_negatives=max_negatives)
+            slice_auc = float(sliced.iloc[0]["auc"])
+            slice_feature = str(sliced.iloc[0]["feature"])
+            slice_direction = str(sliced.iloc[0]["direction"])
+
+        # The gate applies to the conditional number when one exists.
+        gated = best["auc"] if slice_auc is None else slice_auc
         rows.append(
             {
                 "attack_id": card_id,
                 "n_events": len(frame),
                 "best_feature": str(best["feature"]),
                 "best_auc": float(best["auc"]),
+                "best_direction": str(best["direction"]),
+                "slice_auc": slice_auc,
+                "slice_feature": slice_feature,
+                "slice_direction": slice_direction,
+                "slice_n": slice_n,
                 "runners_up": ", ".join(
-                    f"{r.feature} {r.auc:.3f}" for r in ranked.iloc[1 : 1 + top_k].itertuples()
+                    f"{r.feature} {r.auc:.3f} {r.direction}"
+                    for r in ranked.iloc[1 : 1 + top_k].itertuples()
                 ),
-                "passes": bool(best["auc"] <= GATE_AUC),
+                "passes": bool(gated <= GATE_AUC),
             }
         )
     return pd.DataFrame(rows)
 
 
+def build_slices(background: pd.DataFrame, registry: dict[str, type]) -> dict[str, np.ndarray]:
+    """Ask every injector for its definitional slice over ``background``."""
+    out: dict[str, np.ndarray] = {}
+    for card_id, cls in registry.items():
+        mask = cls.probe_slice(background)
+        if mask is not None:
+            out[card_id] = np.asarray(mask, dtype=bool)
+    return out
+
+
 def format_probe_table(report: pd.DataFrame) -> str:
     """Render the probe report as the block the foundry CLI prints."""
+    has_slice = "slice_auc" in report.columns and report["slice_auc"].notna().any()
+
+    def _named(feature: object, direction: object, width: int) -> str:
+        """``feature [hi]`` / ``feature [lo]`` -- never the bare magnitude."""
+        if not isinstance(feature, str):
+            return "-".ljust(width)
+        tag = f" [{direction}]" if isinstance(direction, str) else ""
+        return f"{feature[: width - len(tag)]}{tag}".ljust(width)
+
     lines = [
         f"best-single-feature AUC  (depth-1 stump on every column; gate <= {GATE_AUC:.2f})",
         "",
-        f"  {'attack':<8} {'events':>7} {'best AUC':>9}  {'feature':<34} ok",
-        f"  {'-' * 8} {'-' * 7} {'-' * 9}  {'-' * 34} --",
+        f"  {'attack':<8} {'events':>7} {'vs all':>7}  {'feature [hi/lo]':<34} "
+        f"{'in slice':>8} {'slice n':>9}  {'feature (within slice)':<34} ok",
+        f"  {'-' * 8} {'-' * 7} {'-' * 7}  {'-' * 34} {'-' * 8} {'-' * 9}  {'-' * 34} --",
     ]
     for row in report.itertuples():
         flag = "ok" if row.passes else "!!"
-        lines.append(
-            f"  {row.attack_id:<8} {row.n_events:>7,} {row.best_auc:>9.3f}  "
-            f"{row.best_feature[:34]:<34} {flag}"
+        slice_auc = getattr(row, "slice_auc", None)
+        slice_n = getattr(row, "slice_n", None)
+        cell = "       -" if slice_auc is None or pd.isna(slice_auc) else f"{slice_auc:>8.3f}"
+        if slice_n is None or pd.isna(slice_n):
+            n_cell = "        -"
+        else:
+            thin = "!" if int(slice_n) < THIN_SLICE_ROWS else " "
+            n_cell = f"{int(slice_n):>8,}{thin}"
+        best_cell = _named(row.best_feature, getattr(row, "best_direction", None), 34)
+        slice_cell = _named(
+            getattr(row, "slice_feature", None), getattr(row, "slice_direction", None), 34
         )
+        lines.append(
+            f"  {row.attack_id:<8} {row.n_events:>7,} {row.best_auc:>7.3f}  "
+            f"{best_cell} {cell} {n_cell}  {slice_cell} {flag}"
+        )
+    lines.append("")
+    lines.append(
+        "  [hi] = the attack sits HIGH on that feature; [lo] = it sits LOW. The AUC\n"
+        "  magnitude alone is direction-blind (the probe reports max(a, 1-a)), and\n"
+        "  reading it without the tag is how 'auth_response=approved 0.69' gets\n"
+        "  mistaken for 'approved more often' when it means the opposite."
+    )
     lines.append("")
     lines.append("  runners-up (next strongest single columns):")
     for row in report.itertuples():
@@ -270,6 +452,23 @@ def format_probe_table(report: pd.DataFrame) -> str:
         "  A depth-1 stump is the weakest possible model. Nothing here clears the gate,\n"
         "  so every attack requires combined evidence -- which is what the firewall is."
     )
+    if has_slice:
+        lines.append("")
+        lines.append(
+            "  'in slice' measures the attack inside the definitional slice of traffic it\n"
+            "  lives in -- agent-mediated authorisations for the F1 cards, and refunds by\n"
+            "  agent-mediated customers for F1-03. Unconditionally, ANY attack carrying an\n"
+            "  agentic block scores ~0.92 on the nullity of any ag_ column, and any refund\n"
+            "  attack ~0.99 on txn_type, because those columns are the attack's definition\n"
+            "  rather than evidence of it. THE GATE APPLIES TO THE SLICE COLUMN where one\n"
+            "  exists; the unconditional number is printed so the change of denominator is\n"
+            "  visible, and 'slice n' prints the size of that denominator; a '!' marks a\n"
+            f"  slice thinner than {THIN_SLICE_ROWS:,} rows, where it is fragile\n"
+            "  number and should be quoted with the denominator attached. Each injector\n"
+            "  declares its own slice in probe_slice(); tests/test_probe_slices.py proves\n"
+            "  mechanically that a slice reads ONLY columns a detector knows before it\n"
+            "  scores, and none that are a consequence of the attack."
+        )
     return "\n".join(lines)
 
 
@@ -286,7 +485,8 @@ def main() -> None:
     attacks = {
         card_id: run_injector(cls, view, seed=7) for card_id, cls in sorted(REGISTRY.items())
     }
-    print(format_probe_table(probe_report(background, attacks)))
+    slices = build_slices(background, dict(REGISTRY))
+    print(format_probe_table(probe_report(background, attacks, slices=slices)))
 
 
 if __name__ == "__main__":

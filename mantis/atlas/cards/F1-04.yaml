@@ -1,7 +1,7 @@
 id: F1-04
 name: Intent-mandate category drift
 family: F1
-status: mapped
+status: implemented
 rails:
   - agentic
 actor: >-
@@ -41,6 +41,7 @@ mitigations:
   - Enforce the category list at the network, not inside the agent that can reinterpret it.
   - Express intent scopes as explicit code lists rather than natural-language descriptions.
   - Re-confirm with the human whenever the settled category is outside the authorised set.
+generator: mantis.foundry.injectors.f1_04_category_drift:inject
 detected_by:
   - L0
   - L1

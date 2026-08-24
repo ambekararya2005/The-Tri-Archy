@@ -1,7 +1,7 @@
 id: F1-09
 name: Human-present spoofing for liability shift
 family: F1
-status: mapped
+status: implemented
 rails:
   - agentic
   - ecom
@@ -53,6 +53,7 @@ mitigations:
   - Bind liability shift to a verifiable authentication event, never to a self-declared boolean.
   - Rate-limit and monitor the human_present rate per agent and per platform; a platform at 100% presence is making a claim, not a measurement.
   - Retain presence telemetry for post-hoc distributional audit, so spoofing is detectable even after approval.
+generator: mantis.foundry.injectors.f1_09_presence_spoof:inject
 detected_by:
   - L0
   - L1

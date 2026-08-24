@@ -1,7 +1,7 @@
 id: F1-10
 name: Mandate replay and TTL abuse
 family: F1
-status: mapped
+status: implemented
 rails:
   - agentic
 actor: >-
@@ -47,6 +47,7 @@ mitigations:
   - Keep TTLs short and check them at authorisation against network time, not agent-supplied time.
   - Bind the mandate to the agent identity and session that requested it, so a leaked artefact is not portable.
   - Alert on mandate artefacts appearing in logs or caches; treat them as bearer credentials, because they are.
+generator: mantis.foundry.injectors.f1_10_mandate_replay:inject
 detected_by:
   - L0
   - L1

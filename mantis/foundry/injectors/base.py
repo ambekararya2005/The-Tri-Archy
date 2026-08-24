@@ -79,12 +79,15 @@ from mantis.atlas.schema import Status
 from mantis.core.events import (
     ALL_COLUMNS,
     AgenticContext,
+    AuthResponse,
     Channel,
+    DisputeOutcome,
     EntryMode,
     MandateScope,
     MandateType,
     ThreeDSResult,
     TxEvent,
+    TxnType,
 )
 from mantis.foundry.base.simulator import IST
 
@@ -203,6 +206,7 @@ class PopulationView:
     rows_by_mcc: dict[str, np.ndarray]
     amounts_by_mcc: dict[str, np.ndarray]
     hour_weights: np.ndarray
+    settlement_lag_by_channel: dict[str, float]
     start_epoch: int
     end_epoch: int
 
@@ -260,6 +264,14 @@ class PopulationView:
         hour_weights = np.bincount(local_hour, minlength=24).astype(float)
         hour_weights /= hour_weights.sum()
 
+        # Per-rail clearing lag, read off the background rather than assumed.
+        # A clone whose source was declined has no lag of its own, and inventing
+        # one from a global constant would put card refunds on UPI timings.
+        lag_median = frame.groupby("channel")["settlement_lag_hours"].median()
+        settlement_lag = {
+            str(k): (float(v) if np.isfinite(v) else 24.0) for k, v in lag_median.items()
+        }
+
         return cls(
             frame=frame,
             customers=customers,
@@ -268,6 +280,7 @@ class PopulationView:
             rows_by_mcc=by_mcc,
             amounts_by_mcc=amounts_by_mcc,
             hour_weights=hour_weights,
+            settlement_lag_by_channel=settlement_lag,
             start_epoch=int(epoch.min()),
             end_epoch=int(epoch.max()),
         )
@@ -386,11 +399,48 @@ class PopulationView:
         The copy is shallow with respect to the list-valued columns
         (``ag_provenance_chain`` and friends), so callers must **replace** those
         lists rather than mutate them in place. ``finalise`` always replaces.
+
+        The **transaction lifecycle is reset** to an approved, settled purchase.
+        A clone inherits its source's whole row, and since Day 3 that row might
+        be a decline, a reversal, or a refund pointing at some third party's
+        purchase — none of which the injector asked for, and the last of which
+        would leave a dangling ``original_event_id``. Resetting here means every
+        injector starts from the same neutral lifecycle and has to *opt in* to a
+        decline or a refund, which is exactly how F4-27, F4-28 and F1-03 use it.
         """
         rows = self.frame.iloc[positions].copy()
         rows.reset_index(drop=True, inplace=True)
         rows[_MANDATE_AGE_COL] = (rows["ts"] - rows["ag_mandate_issued_ts"]).dt.total_seconds()
+        self.reset_lifecycle(rows)
         return rows
+
+    def reset_lifecycle(self, rows: pd.DataFrame) -> None:
+        """Make cloned rows approved, settled purchases with no history."""
+        rows["txn_type"] = TxnType.PURCHASE.value
+        rows["auth_response"] = AuthResponse.APPROVED.value
+        rows["original_event_id"] = None
+        rows["dispute_outcome"] = None
+        rows["dispute_raised_ts"] = pd.NaT
+        rows["settled"] = True
+        fallback = rows["channel"].map(self.settlement_lag_by_channel).astype(float)
+        rows["settlement_lag_hours"] = rows["settlement_lag_hours"].astype(float).fillna(fallback)
+
+    def decline(
+        self,
+        rows: pd.DataFrame,
+        mask: np.ndarray,
+        reasons: np.ndarray | str,
+    ) -> None:
+        """Mark rows declined, and keep the clearing columns coherent.
+
+        A declined authorisation never settles. The schema enforces that, but
+        enforcing it *here* means an injector cannot accidentally emit a frame
+        that only fails three steps later inside ``events_from_frame``.
+        """
+        mask = np.asarray(mask, dtype=bool)
+        rows.loc[mask, "auth_response"] = reasons
+        rows.loc[mask, "settled"] = False
+        rows.loc[mask, "settlement_lag_hours"] = np.nan
 
     def retarget(self, rows: pd.DataFrame, merchant_ids: np.ndarray) -> None:
         """Point cloned rows at different merchants, in place, keeping geo honest.
@@ -507,7 +557,13 @@ class PopulationView:
         rows["attack_id"] = card_id
         rows["attack_campaign"] = campaigns
 
-        agentic = (rows["channel"] == "agentic").to_numpy()
+        # Keyed on the agentic *block*, not the rail. Since Day 3 an F1 injector
+        # can present an agent-originated purchase over a plain ecom rail (legal
+        # under the frozen schema when entry_mode='agent_token', and named by
+        # three F1 cards), and those rows need their mandate repairing exactly
+        # like the ones that stayed on the agentic channel. For every Day 2
+        # injector this mask is identical to the old one.
+        agentic = rows["ag_agent_id"].notna().to_numpy()
         if agentic.any():
             self._repair_agentic(rows, agentic, rng=rng, repair_scope=repair_scope)
 
@@ -637,6 +693,60 @@ class BaseAttack(ABC):
         """The atlas card this injector implements."""
         return ATLAS[self.card_id]
 
+    #: Columns :meth:`probe_slice` is allowed to read. Empty when no slice is
+    #: declared. Every name must appear in ``probe.SLICE_ALLOWED_COLUMNS``, and
+    #: ``tests/test_probe_slices.py`` proves the mask really is a function of
+    #: these columns alone -- a slice that secretly read ``amount`` or the
+    #: provenance chain would be conditioning on the attack's own footprint, and
+    #: the conditional AUC it produced would mean nothing.
+    slice_columns: ClassVar[tuple[str, ...]] = ()
+
+    @classmethod
+    def probe_slice(cls, frame: pd.DataFrame) -> np.ndarray | None:
+        """The background rows this attack should be measured *against*.
+
+        Return ``None`` (the default) to be measured against the whole
+        population. Return a boolean mask to declare that the attack lives
+        inside a **definitional slice** of traffic, and that the honest question
+        is whether one column separates it *within* that slice.
+
+        Why this exists, and why it is not a way of grading ourselves gently
+        ---------------------------------------------------------------------
+        Some properties of an attack are not evidence, they are its definition.
+        Every F1 attack carries an agentic block, and only ~15% of the
+        population does, so *any* F1 injector scores ~0.92 on the nullity of
+        *any* ``ag_`` column before it has done anything at all. F1-03 is a
+        refund attack, and refunds are ~2% of traffic, so ``txn_type=refund``
+        alone scores ~0.99. Neither number says the attack is easy to detect;
+        both say the attack happens on a rail we already knew it happened on. An
+        issuer does not congratulate itself for noticing that a refund is a
+        refund.
+
+        This is the same reasoning the Day 1 audit settled on for the rail
+        (CLAUDE.md, "rail identity is unhideable, and that is fine"): columns
+        that are definitional get no bound, and the test that protects us is the
+        *conditional* one. Declaring the slice here makes that conditioning an
+        explicit, reviewable property of each injector rather than a special
+        case buried in the probe.
+
+        The gate applies to the **conditional** number when a slice is declared.
+        The unconditional number is still computed and still printed, so nobody
+        can accuse us of quietly moving the denominator; it simply is not the
+        number that decides whether an attack is a cartoon.
+
+        **The constraint that makes this legitimate.** A slice may condition only
+        on facts a detector already knows before it scores, and which are not
+        consequences of the attack -- rail, processing code, category. It may not
+        condition on anything the attack itself produced. Slicing F1-01 to
+        "agent-mediated" is fair; slicing it to "agent-mediated and provenance
+        chain longer than three" would be marking our own homework. An injector
+        declaring its own slice is self-assessment unless that rule is enforced,
+        so it is: name the columns in :attr:`slice_columns`, and
+        ``tests/test_probe_slices.py`` checks both that they are on the
+        allow-list and that the returned mask genuinely depends on nothing else.
+        """
+        return None
+
     @abstractmethod
     def inject(
         self, population: pd.DataFrame, intensity: float, rng: np.random.Generator
@@ -764,6 +874,28 @@ def validate_attack_frame(rows: pd.DataFrame, card_id: str, background: pd.DataF
     if bool(rows["event_id"].isin(background["event_id"]).any()):
         raise InjectorError(f"{card_id}: attack event_id collides with the background")
 
+    # The lifecycle block must describe something that can happen. The frozen
+    # schema checks this too, but only once the frame is rebuilt into events;
+    # catching it here names the injector that did it.
+    declined = rows["auth_response"] != AuthResponse.APPROVED.value
+    if bool((declined & rows["settled"].astype(bool)).any()):
+        raise InjectorError(f"{card_id}: a declined authorisation is marked settled")
+    unsettled = ~rows["settled"].astype(bool)
+    if bool((unsettled & rows["settlement_lag_hours"].notna()).any()):
+        raise InjectorError(f"{card_id}: settlement lag on an unsettled authorisation")
+    inbound = rows["txn_type"].isin([TxnType.PURCHASE.value, TxnType.PREAUTH.value])
+    if bool((inbound & rows["original_event_id"].notna()).any()):
+        raise InjectorError(f"{card_id}: original_event_id on a purchase or pre-authorisation")
+    linked = rows["original_event_id"].dropna()
+    if len(linked):
+        known = set(background["event_id"]) | set(rows["event_id"])
+        unknown = [e for e in linked if e not in known]
+        if unknown:
+            raise InjectorError(
+                f"{card_id}: {len(unknown)} rows reference an original_event_id that is in "
+                "neither the background nor the attack; a refund must name a real purchase"
+            )
+
     # Entities must be reused, not invented. Fraud that only ever touches
     # never-before-seen customers and merchants is trivially separable, and a
     # detector trained on it learns nothing transferable.
@@ -830,6 +962,10 @@ def demo_main(cls: type[BaseAttack], *, n_events: int = 20_000) -> None:
         f"  customers  {rows['customer_id'].nunique()}   merchants {rows['merchant_id'].nunique()}"
     )
     print(f"  rails      {dict(rows['channel'].value_counts())}")
+    print(f"  txn types  {dict(rows['txn_type'].value_counts())}")
+    declined = rows["auth_response"] != "approved"
+    reasons = dict(rows.loc[declined, "auth_response"].value_counts())
+    print(f"  declined   {declined.mean():.1%}  {reasons}")
     print(
         f"  amount     median {rows['amount'].median():,.0f}  "
         f"p90 {rows['amount'].quantile(0.9):,.0f}  max {rows['amount'].max():,.0f}"
@@ -941,6 +1077,17 @@ def events_from_frame(frame: pd.DataFrame) -> Iterator[TxEvent]:
             lat=_opt(row["lat"]),  # type: ignore[arg-type]
             lon=_opt(row["lon"]),  # type: ignore[arg-type]
             threeds_result=ThreeDSResult(str(row["threeds_result"])),
+            txn_type=TxnType(str(row["txn_type"])),
+            auth_response=AuthResponse(str(row["auth_response"])),
+            original_event_id=_opt(row["original_event_id"]),  # type: ignore[arg-type]
+            dispute_outcome=(
+                None
+                if _opt(row["dispute_outcome"]) is None
+                else DisputeOutcome(str(row["dispute_outcome"]))
+            ),
+            dispute_raised_ts=_opt(row["dispute_raised_ts"]),  # type: ignore[arg-type]
+            settled=bool(row["settled"]),
+            settlement_lag_hours=_opt(row["settlement_lag_hours"]),  # type: ignore[arg-type]
             agentic=agentic,
             is_fraud=bool(row["is_fraud"]),
             attack_id=_opt(row["attack_id"]),  # type: ignore[arg-type]

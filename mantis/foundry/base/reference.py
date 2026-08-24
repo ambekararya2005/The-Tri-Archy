@@ -42,7 +42,7 @@ from typing import Any, Final
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from mantis.core.events import Channel, EntryMode, MandateType, ThreeDSResult
+from mantis.core.events import AuthResponse, Channel, EntryMode, MandateType, ThreeDSResult
 from mantis.core.paths import REFERENCE_STATS_JSON
 
 __all__ = [
@@ -512,6 +512,63 @@ _MANDATE_TYPE_PRIOR: Final[dict[str, float]] = {
     MandateType.PAYMENT.value: 0.08,
 }
 
+# --------------------------------------------------------------------------- #
+# Transaction lifecycle (schema amendment 1.1.0)
+# --------------------------------------------------------------------------- #
+
+#: Per-channel authorisation decline rate. Card-present is the cleanest rail --
+#: the credential is physically there and the terminal pre-screens -- while
+#: card-not-present carries the well-known double-digit decline rate the whole
+#: "false decline" industry exists because of. The agentic rail sits a touch
+#: above ecom: issuers have no history on it, so they are cautious. These are the
+#: rates an *adaptive* adversary is measuring, so a background that approved
+#: everything would make F4-27's oracle a pure generator artefact.
+_DECLINE_RATE_PRIOR: Final[dict[str, float]] = {
+    Channel.CARD_PRESENT.value: 0.028,
+    Channel.ECOM.value: 0.115,
+    Channel.MOTO.value: 0.140,
+    Channel.RECURRING.value: 0.095,
+    Channel.UPI_P2M.value: 0.052,
+    Channel.UPI_P2P.value: 0.061,
+    Channel.AGENTIC.value: 0.128,
+}
+
+#: Why an authorisation was declined. Insufficient funds dominates in a
+#: debit-heavy market; ``declined_risk`` is deliberately the smallest slice,
+#: because an issuer risk decline is rare next to a plain funding failure -- and
+#: because F4-28's operator is hunting for exactly that slice.
+_DECLINE_REASON_PRIOR: Final[dict[str, float]] = {
+    AuthResponse.DECLINED_INSUFFICIENT_FUNDS.value: 0.46,
+    AuthResponse.DECLINED_DO_NOT_HONOR.value: 0.27,
+    AuthResponse.DECLINED_INVALID_CVV.value: 0.13,
+    AuthResponse.DECLINED_EXPIRED.value: 0.08,
+    AuthResponse.DECLINED_RISK.value: 0.06,
+}
+
+#: Median hours from authorisation to clearing, per channel. Card rails clear on
+#: the next acquirer file; UPI settles in near-real time. The **bimodality** is
+#: load-bearing: it is what stops "settled in minutes" from being a free
+#: detector for F1-03's instant-settlement refunds.
+_SETTLEMENT_LAG_PRIOR: Final[dict[str, float]] = {
+    Channel.CARD_PRESENT.value: 26.0,
+    Channel.ECOM.value: 31.0,
+    Channel.MOTO.value: 34.0,
+    Channel.RECURRING.value: 25.0,
+    Channel.UPI_P2M.value: 0.09,
+    Channel.UPI_P2P.value: 0.03,
+    Channel.AGENTIC.value: 22.0,
+}
+
+#: Delegation depth for legitimate agentic traffic. Thins out rather than
+#: stopping: see ``ReferenceStats.delegation_depth_weights``.
+_DELEGATION_DEPTH_PRIOR: Final[dict[str, float]] = {
+    "1": 0.780,
+    "2": 0.170,
+    "3": 0.035,
+    "4": 0.012,
+    "5": 0.003,
+}
+
 _DEFAULT_PROVENANCE: Final[dict[str, str]] = {
     "amounts": "Indian-market priors; per-MCC log-normal medians in INR, practitioner estimates "
     "consistent with published RBI/NPCI ticket-size aggregates.",
@@ -522,6 +579,9 @@ _DEFAULT_PROVENANCE: Final[dict[str, str]] = {
     "geography": "Metro anchors weighted by card-accepting volume, not headcount.",
     "agentic": "Modelled, not measured. There is no public agentic-payments panel; "
     "manufacturing this is the entire point of the project.",
+    "lifecycle": "Decline rates, settlement lag and dispute rates are practitioner "
+    "estimates for the Indian card/UPI mix; the shape that matters is the "
+    "card-versus-UPI settlement bimodality, not the exact medians.",
 }
 
 
@@ -669,6 +729,133 @@ class ReferenceStats(BaseModel):
     mandate_type_weights: dict[str, float] = Field(
         default_factory=lambda: dict(_MANDATE_TYPE_PRIOR)
     )
+    delegation_depth_weights: dict[str, float] = Field(
+        default_factory=lambda: dict(_DELEGATION_DEPTH_PRIOR),
+        description=(
+            "Agent-to-sub-agent hops between the human and the payment. Day 1 "
+            "capped legitimate traffic at three, which made depth>=4 a perfect "
+            "detector for F1-05 -- a property of the generator, not of "
+            "delegation laundering. Multi-agent orchestration genuinely does "
+            "produce deep chains legitimately (a shopping agent calling a "
+            "booking agent calling a checkout capability is three hops before "
+            "anything unusual has happened), so the tail now runs to five and "
+            "thins out rather than stopping."
+        ),
+    )
+
+    # -- transaction lifecycle (schema amendment 1.1.0) ----------------------- #
+    decline_rate: dict[str, float] = Field(
+        default_factory=lambda: dict(_DECLINE_RATE_PRIOR),
+        description="Channel -> share of authorisations declined. NOT normalised: "
+        "each entry is an independent probability, not a share of a whole.",
+    )
+    decline_reason_weights: dict[str, float] = Field(
+        default_factory=lambda: dict(_DECLINE_REASON_PRIOR)
+    )
+    decline_amount_tilt: float = Field(
+        default=0.55,
+        ge=0.0,
+        description=(
+            "How much a large ticket raises the odds of a decline, as a "
+            "coefficient on the log-amount z-score. Non-zero on purpose: a "
+            "decline rate independent of amount would let a detector treat "
+            "declines as pure noise, when in reality they carry signal."
+        ),
+    )
+    settlement_lag_median_hours: dict[str, float] = Field(
+        default_factory=lambda: dict(_SETTLEMENT_LAG_PRIOR),
+        description="Channel -> median hours from authorisation to clearing.",
+    )
+    settlement_lag_sigma: float = Field(
+        default=0.55, gt=0, description="Dispersion of ln(settlement lag)."
+    )
+    unsettled_share: float = Field(
+        default=0.012,
+        ge=0.0,
+        le=1.0,
+        description="Approved authorisations that never clear inside the window: "
+        "abandoned pre-auths, expired holds, late acquirer files.",
+    )
+    refund_share: float = Field(
+        default=0.021,
+        ge=0.0,
+        le=0.2,
+        description="Share of events that are refunds against an earlier purchase. "
+        "Around 2% of retail card volume comes back.",
+    )
+    reversal_share: float = Field(
+        default=0.006,
+        ge=0.0,
+        le=0.2,
+        description="Share of events that are authorisation reversals, cancelled "
+        "before clearing. Never settle, by definition.",
+    )
+    credit_share: float = Field(
+        default=0.0016,
+        ge=0.0,
+        le=0.2,
+        description="Outbound credits with no purchase behind them: goodwill "
+        "payments, promotional credits. Small, but it must be non-zero -- a "
+        "txn_type level absent from the background would be a free label for "
+        "any attack that used it.",
+    )
+    preauth_share: float = Field(
+        default=0.024,
+        ge=0.0,
+        le=0.2,
+        description="Pre-authorisation holds: fuel, hotels, car hire.",
+    )
+    refund_full_share: float = Field(
+        default=0.68, ge=0.0, le=1.0, description="Refunds returning the whole original amount."
+    )
+    refund_lag_median_hours: float = Field(
+        default=62.0, gt=0, description="Median hours from a purchase to its refund."
+    )
+    refund_instant_share: float = Field(
+        default=0.24,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Share of legitimate refunds that clear in minutes rather than on "
+            "the next acquirer file. Instant refunds are a real and growing "
+            "merchant offering, and this tail is load-bearing: F1-03's whole "
+            "operational goal is a credit that settles before a human looks, so "
+            "if no legitimate refund ever settled fast, 'settled fast' would be "
+            "a one-column detector at 0.99 AUC and the attack would be a "
+            "cartoon. Same argument as the card-versus-UPI settlement "
+            "bimodality, applied to the refund path."
+        ),
+    )
+    dispute_rate: float = Field(
+        default=0.0009,
+        ge=0.0,
+        le=1.0,
+        description="Share of settled purchases the cardholder disputes. Basis "
+        "points, as in reality -- and post-hoc, so never a scoring feature.",
+    )
+    dispute_won_cardholder_share: float = Field(
+        default=0.62, ge=0.0, le=1.0, description="Of resolved disputes, share the cardholder wins."
+    )
+    dispute_unresolved_share: float = Field(
+        default=0.18,
+        ge=0.0,
+        le=1.0,
+        description="Disputes still open at the end of the window. A file where "
+        "every dispute has already resolved would be a file from the future.",
+    )
+    human_present_passive_share: float = Field(
+        default=0.11,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Share of genuinely human-present agentic sessions where the person "
+            "is watching but not touching -- reading on a second screen while the "
+            "agent drives -- so the telemetry looks machine-like anyway. Without "
+            "this tail, (human_present=True, low cursor_entropy) would be a "
+            "perfect deterministic detector for F1-09, which would be a property "
+            "of our generator rather than of spoofing."
+        ),
+    )
 
     # -- validation & normalisation -------------------------------------------- #
 
@@ -702,6 +889,35 @@ class ReferenceStats(BaseModel):
     @classmethod
     def _norm_simple(cls, v: dict[str, float]) -> dict[str, float]:
         return _normalise(v)
+
+    @field_validator("delegation_depth_weights")
+    @classmethod
+    def _norm_delegation(cls, v: dict[str, float]) -> dict[str, float]:
+        bad = [k for k in v if not k.isdigit() or int(k) < 1]
+        if bad:
+            raise ValueError(f"delegation depths must be positive integers, got {bad}")
+        return _normalise(v)
+
+    @field_validator("decline_reason_weights")
+    @classmethod
+    def _norm_decline_reasons(cls, v: dict[str, float]) -> dict[str, float]:
+        valid = {r.value for r in AuthResponse if r is not AuthResponse.APPROVED}
+        unknown = set(v) - valid
+        if unknown:
+            raise ValueError(f"unknown decline reasons {sorted(unknown)}")
+        return _normalise(v)
+
+    @field_validator("decline_rate", "settlement_lag_median_hours")
+    @classmethod
+    def _check_per_channel(cls, v: dict[str, float]) -> dict[str, float]:
+        """Per-channel probabilities and lags. Every channel must be covered."""
+        missing = {c.value for c in Channel} - set(v)
+        if missing:
+            raise ValueError(f"no entry for channel(s) {sorted(missing)}")
+        bad = {k: x for k, x in v.items() if x < 0}
+        if bad:
+            raise ValueError(f"negative values: {bad}")
+        return v
 
     @field_validator("mandate_type_weights")
     @classmethod

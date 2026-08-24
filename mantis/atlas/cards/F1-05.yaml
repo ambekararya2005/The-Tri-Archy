@@ -1,7 +1,7 @@
 id: F1-05
 name: Delegation-chain laundering through sub-agents
 family: F1
-status: mapped
+status: implemented
 rails:
   - agentic
 actor: >-
@@ -41,6 +41,7 @@ mitigations:
   - Pin a maximum delegation depth inside the mandate and enforce it at the network.
   - Require each hop to attest its own identity, so the chain is auditable end to end.
   - Re-verify consent whenever the executing agent differs from the agent the human chose.
+generator: mantis.foundry.injectors.f1_05_delegation_laundering:inject
 detected_by:
   - L0
   - L1

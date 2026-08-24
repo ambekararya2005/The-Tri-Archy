@@ -41,12 +41,14 @@ EXPECTED_FAMILY_SIZES: dict[Family, int] = {
 }
 
 EXPECTED_TOTAL = 42
-EXPECTED_IMPLEMENTED = 8
+EXPECTED_IMPLEMENTED = 15
 
-#: Families with a working injector today. F1 (mandate abuse) and F5 (platform
-#: integrity) are the agentic injectors scheduled for Day 3; they are absent
-#: here rather than faked, and this set is the ratchet that records it.
-EXPECTED_IMPLEMENTED_FAMILIES = {Family.F2, Family.F3, Family.F4, Family.F6}
+#: Families with a working injector today. F1 (mandate abuse) arrived on Day 3
+#: with seven injectors -- the agentic attacks the whole project exists for.
+#: F5 (platform integrity) is still absent, deliberately and visibly: it is the
+#: zero-day holdout family, and this set is the ratchet that records the fact
+#: rather than letting a writeup drift ahead of the code.
+EXPECTED_IMPLEMENTED_FAMILIES = {Family.F1, Family.F2, Family.F3, Family.F4, Family.F6}
 
 
 def test_atlas_is_complete() -> None:
@@ -58,8 +60,13 @@ def test_family_sizes_match_the_plan() -> None:
     assert {f: len(cards) for f, cards in grouped.items()} == EXPECTED_FAMILY_SIZES
 
 
-def test_exactly_eight_cards_are_implemented() -> None:
-    """The number we say out loud. If this changes, the writeup changes with it."""
+def test_the_implemented_count_is_the_number_we_say_out_loud() -> None:
+    """A ratchet: it moves only when code lands, never when a claim does.
+
+    Day 1 claimed 15 on the strength of planned generator paths and Day 2 cut it
+    to 8 by making the claim enforceable at import. Day 3 earns 15 back, with an
+    injector behind every one of them.
+    """
     assert len(implemented()) == EXPECTED_IMPLEMENTED
 
 

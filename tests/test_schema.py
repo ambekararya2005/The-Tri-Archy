@@ -14,14 +14,21 @@ from pydantic import ValidationError
 from mantis.core.events import (
     AGENTIC_COLUMNS,
     ALL_COLUMNS,
+    CLASSIC_COLUMNS,
+    DECLINE_RESPONSES,
     LABEL_COLUMNS,
+    POST_HOC_COLUMNS,
+    SCHEMA_VERSION,
     AgenticContext,
+    AuthResponse,
     Channel,
+    DisputeOutcome,
     EntryMode,
     MandateScope,
     MandateType,
     ThreeDSResult,
     TxEvent,
+    TxnType,
     flatten,
 )
 
@@ -255,6 +262,147 @@ def test_unknown_field_is_rejected() -> None:
     """extra='forbid' is what keeps the frozen schema actually frozen."""
     with pytest.raises(ValidationError):
         make_classic_event(risk_score=0.9)
+
+
+# --------------------------------------------------------------------------- #
+# Amendment 1.1.0: the transaction lifecycle
+# --------------------------------------------------------------------------- #
+
+#: The seventeen columns the Day 0 freeze emitted, in order. Pinned literally.
+#: The amendment is additive, and "additive" means a 1.0.0 reader slicing the
+#: front of the frame still gets exactly what it got before. If this list ever
+#: needs editing, the change was not additive and CLAUDE.md section 4 applies.
+V1_CLASSIC_COLUMNS = (
+    "event_id",
+    "ts",
+    "amount",
+    "currency",
+    "mcc",
+    "channel",
+    "entry_mode",
+    "customer_id",
+    "card_bin",
+    "merchant_id",
+    "merchant_country",
+    "terminal_id",
+    "device_id",
+    "ip",
+    "lat",
+    "lon",
+    "threeds_result",
+)
+
+
+def test_schema_version_is_recorded() -> None:
+    assert SCHEMA_VERSION == "1.1.0"
+
+
+def test_amendment_is_purely_additive() -> None:
+    """Nothing was renamed, retyped, reordered or removed."""
+    assert CLASSIC_COLUMNS[: len(V1_CLASSIC_COLUMNS)] == V1_CLASSIC_COLUMNS
+    assert ALL_COLUMNS[-len(LABEL_COLUMNS) :] == LABEL_COLUMNS
+    assert set(POST_HOC_COLUMNS) <= set(ALL_COLUMNS)
+    assert set(POST_HOC_COLUMNS).isdisjoint(LABEL_COLUMNS)
+
+
+def test_lifecycle_defaults_reproduce_a_settled_approved_purchase() -> None:
+    """Every 1.0.0 call site keeps working, unchanged, with no new arguments."""
+    ev = make_classic_event()
+    assert ev.txn_type is TxnType.PURCHASE
+    assert ev.auth_response is AuthResponse.APPROVED
+    assert ev.original_event_id is None
+    assert ev.dispute_outcome is None
+    assert ev.settled is True
+    assert ev.settlement_lag_hours is None
+
+    row = flatten(ev)
+    assert row["txn_type"] == "purchase"
+    assert row["auth_response"] == "approved"
+    assert row["settled"] is True
+
+
+def test_decline_responses_names_every_non_approval() -> None:
+    assert set(DECLINE_RESPONSES) == {r.value for r in AuthResponse} - {"approved"}
+    assert "approved" not in DECLINE_RESPONSES
+
+
+def test_a_declined_authorisation_cannot_settle() -> None:
+    """An impossible combination a model would happily memorise."""
+    with pytest.raises(ValidationError, match="cannot settle"):
+        make_classic_event(auth_response=AuthResponse.DECLINED_RISK)
+    with pytest.raises(ValidationError, match="declined authorisation"):
+        make_classic_event(
+            auth_response=AuthResponse.DECLINED_RISK, settled=False, settlement_lag_hours=4.0
+        )
+    ok = make_classic_event(auth_response=AuthResponse.DECLINED_INVALID_CVV, settled=False)
+    assert ok.settlement_lag_hours is None
+
+
+def test_unsettled_authorisation_carries_no_lag() -> None:
+    with pytest.raises(ValidationError, match="unsettled"):
+        make_classic_event(settled=False, settlement_lag_hours=12.0)
+
+
+def test_original_event_id_only_on_outbound_flows() -> None:
+    with pytest.raises(ValidationError, match="only refunds, reversals and credits"):
+        make_classic_event(original_event_id="evt-classic-9999")
+    with pytest.raises(ValidationError, match="itself"):
+        make_classic_event(txn_type=TxnType.REFUND, original_event_id="evt-classic-0001")
+
+    ev = make_classic_event(txn_type=TxnType.REFUND, original_event_id="evt-classic-9999")
+    assert ev.original_event_id == "evt-classic-9999"
+
+
+def test_an_orphan_credit_stays_representable() -> None:
+    """The central F1-03 shape: money going out with no purchase behind it.
+
+    A schema that required ``original_event_id`` on a credit would make the
+    attack unrepresentable, exactly the way 1.0.0 did. It must stay legal, and
+    its detection must be the firewall's job rather than the validator's.
+    """
+    ev = make_classic_event(txn_type=TxnType.CREDIT, settlement_lag_hours=0.1)
+    assert ev.original_event_id is None
+    assert flatten(ev)["txn_type"] == "credit"
+
+
+def test_dispute_fields_must_agree() -> None:
+    raised = ISSUED + timedelta(days=9)
+    with pytest.raises(ValidationError, match="requires dispute_raised_ts"):
+        make_classic_event(dispute_outcome=DisputeOutcome.WON_CARDHOLDER)
+    with pytest.raises(ValidationError, match="no dispute recorded"):
+        make_classic_event(dispute_raised_ts=raised)
+    with pytest.raises(ValidationError, match="before the authorisation"):
+        make_classic_event(
+            dispute_outcome=DisputeOutcome.RAISED, dispute_raised_ts=ISSUED - timedelta(days=1)
+        )
+
+    ev = make_classic_event(dispute_outcome=DisputeOutcome.RAISED, dispute_raised_ts=raised)
+    assert flatten(ev)["dispute_outcome"] == "raised"
+    # dispute_outcome='none' is the explicit "checked, nothing happened" value
+    # and must not require a timestamp.
+    assert make_classic_event(dispute_outcome=DisputeOutcome.NONE).dispute_raised_ts is None
+
+
+def test_amount_stays_non_negative_on_outbound_flows() -> None:
+    """Direction is carried by txn_type, not by the sign of the amount.
+
+    A signed amount would silently break every quantile, KS distance and
+    log-amount feature calibrated against the Day 1 population.
+    """
+    with pytest.raises(ValidationError):
+        make_classic_event(txn_type=TxnType.REFUND, amount=-100.0)
+    assert make_classic_event(txn_type=TxnType.REFUND, amount=100.0).amount == 100.0
+
+
+def test_lifecycle_round_trips_through_json() -> None:
+    ev = make_agentic_event(
+        txn_type=TxnType.REFUND,
+        original_event_id="evt-agentic-0000",
+        settlement_lag_hours=0.25,
+        dispute_outcome=DisputeOutcome.WON_MERCHANT,
+        dispute_raised_ts=ISSUED + timedelta(days=30),
+    )
+    assert TxEvent.model_validate_json(ev.model_dump_json()) == ev
 
 
 def test_mandate_expiry_helper() -> None:

@@ -1,7 +1,7 @@
 id: F1-03
 name: Refund-logic hijack
 family: F1
-status: mapped
+status: implemented
 rails:
   - agentic
   - ecom
@@ -49,6 +49,7 @@ mitigations:
   - Cap agent refund authority by amount and rate, with escalation above the cap.
   - Require a matching authorisation record before any agent-initiated credit clears.
   - Score refund flows with the same firewall the purchase flow gets, not a lighter one.
+generator: mantis.foundry.injectors.f1_03_refund_hijack:inject
 detected_by:
   - L0
   - L1

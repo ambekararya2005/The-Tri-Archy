@@ -60,6 +60,13 @@ __all__ = [
 #: silently skip a module with an import error, which is precisely the failure
 #: this package exists to make loud.
 _MODULES: Final[tuple[str, ...]] = (
+    "f1_01_cart_tampering",
+    "f1_02_scope_inflation",
+    "f1_03_refund_hijack",
+    "f1_04_category_drift",
+    "f1_05_delegation_laundering",
+    "f1_09_presence_spoof",
+    "f1_10_mandate_replay",
     "f2_13_synthetic_identity",
     "f2_16_bust_out",
     "f3_19_digital_arrest",

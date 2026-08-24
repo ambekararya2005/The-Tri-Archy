@@ -24,22 +24,47 @@ Modelling decisions worth defending
   concentrated on one BIN would make a single BIN indicator a near-perfect
   classifier, which is a property of a lazy generator rather than of BIN attacks.
 
-What the frozen schema cannot represent, stated plainly
--------------------------------------------------------
-``TxEvent`` is an *authorisation request*. It carries no response code, so the
-decline half of the oracle — the signal ``decline_ratio_1h`` on the card is
-named for — is not in this dataset. What is representable, and what this
-injector produces, is the request-side footprint: attempt velocity within a BIN
-range, probe-band amount clustering, and merchant fan-out. The card keeps
-``decline_ratio_1h`` because a deployed issuer has it; the foundry does not
-pretend to.
+The oracle, now that the schema can carry it (amendment 1.1.0)
+--------------------------------------------------------------
+Until Day 3 this injector modelled only half the attack. ``TxEvent`` carried no
+response code, so the *feedback channel* — the thing that makes this a search
+rather than a spree — had nowhere to live, and the card's ``decline_ratio_1h``
+signal was unmeasurable in our own data. The amendment fixed that, and the
+attack is now shaped the way it really is:
+
+* **The probe phase mostly fails.** Around 56% of search attempts are declined,
+  overwhelmingly ``do_not_honor`` and ``insufficient_funds`` — the operator is
+  spraying a finite set of stolen credentials across merchants and reading which
+  combinations come back approved. The background declines at roughly 9%, so
+  this is a real elevation without being a categorical giveaway. Measured on the
+  200k gate run: **46.0% campaign-wide, 50-66% inside the probe phase, 0-17%
+  inside escalation** — decline-heavy, which is what card testing looks like.
+
+  *Why 56% and not the 90% naive card testing shows.* Because this card is the
+  **adaptive** BIN attack, and the adaptation is precisely the decision to stay
+  under the decline-ratio and velocity rules every issuer already runs. An
+  operator burning 90% of their attempts describes a campaign that is shut off
+  within the hour and never reaches an escalation phase at all — there would be
+  nothing left for a detector to be interesting about. A 5x elevation over
+  background is high enough to be the signal the card names and low enough to
+  survive the rule, which is the trade-off a competent operator actually makes.
+  The naive high-decline shape is a *different* attack: it is F4-32
+  (decision-boundary mapping through probe transactions), still ``mapped``.
+* **The escalation phase mostly succeeds**, because it goes back through the
+  merchants that just approved. That asymmetry *is* the signal: neither the
+  decline rate nor the approval rate alone says much, but a burst of declines
+  inside one BIN followed by high-value approvals through the same merchants is
+  a shape no legitimate cardholder produces.
+* Declines never settle, so ``settlement_lag_hours`` is null across most of the
+  probe phase. That nullity is a real, free consequence, not a plant.
 
 Realism check (measured, not asserted)
 --------------------------------------
-Best single-feature depth-1 stump AUC: **0.663** (``amount``) — and that is the probe
-band, diluted by the escalation tail. No single column separates this attack; it
-is only visible in aggregate structure across the BIN, which is the claim the
-card makes and the reason the adversarial loop attacks it first.
+Best single-feature depth-1 stump AUC: **see the module-level table printed by
+the probe**. The decline elevation is now the strongest single column, and it is
+deliberately kept to a ~6x lift over background rather than a categorical tell:
+a single declined authorisation is unremarkable, and only the per-BIN aggregate
+is evidence. That is the claim the card makes.
 
 Measured by ``mantis.foundry.injectors.probe`` against a 200k-event background at
 seed 1337, over every column an issuer can read off one authorisation message.
@@ -73,6 +98,23 @@ _PROBE_SHARE: float = 0.78
 #: Quantile bands the two phases resample amounts from, per category.
 _PROBE_BAND: tuple[float, float] = (0.02, 0.30)
 _ESCALATION_BAND: tuple[float, float] = (0.70, 0.95)
+
+#: Share of each phase that comes back declined. The gap between the two is the
+#: attack: the operator is buying information with the probe phase and spending
+#: it in the escalation phase.
+_PROBE_DECLINE_P: float = 0.56
+_ESCALATION_DECLINE_P: float = 0.09
+
+#: What the issuer says when it refuses a probe. A stolen or guessed credential
+#: fails generically far more often than it trips a risk model -- an operator who
+#: saw ``declined_risk`` on every attempt would know they had been spotted.
+_DECLINE_REASONS: tuple[str, ...] = (
+    "declined_do_not_honor",
+    "declined_insufficient_funds",
+    "declined_invalid_cvv",
+    "declined_risk",
+)
+_DECLINE_REASON_P: tuple[float, ...] = (0.47, 0.28, 0.17, 0.08)
 
 
 @register
@@ -139,6 +181,21 @@ class AdaptiveBinAttack(BaseAttack):
                 ts[n_probe:] = starts[c] + search_seconds + rng.integers(0, 14 * 3_600, n_escalate)
             # Each attempt is independent, so each gets its own hour of day.
             view.set_timestamps(rows, ts, rng=rng)
+
+            # The oracle. Search fails most of the time; extraction, going back
+            # through merchants that already approved, mostly does not.
+            phase_p = np.r_[
+                np.full(n_probe, _PROBE_DECLINE_P),
+                np.full(n_escalate, _ESCALATION_DECLINE_P),
+            ]
+            declined = rng.random(n) < phase_p
+            # An invalid-CVV decline is impossible where no CVV was presented.
+            reasons = np.asarray(_DECLINE_REASONS, dtype=object)[
+                rng.choice(len(_DECLINE_REASONS), size=n, p=_DECLINE_REASON_P)
+            ]
+            keyed = rows["entry_mode"].to_numpy() == "ecom_keyed"
+            reasons[~keyed & (reasons == "declined_invalid_cvv")] = "declined_do_not_honor"
+            view.decline(rows, declined, reasons[declined])
 
             blocks.append(
                 view.finalise(

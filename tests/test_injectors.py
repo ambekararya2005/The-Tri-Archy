@@ -44,9 +44,10 @@ from mantis.foundry.injectors.probe import GATE_AUC, build_probe_matrix, probe_a
 #: build a cohort without exhausting the pools.
 SMALL = SimulationConfig(n_events=30_000, seed=7, n_customers=1_200, n_merchants=3_000)
 
-#: The eight cards Day 2 delivers. Locked so a silent regression in the registry
-#: shows up as a test failure rather than as a smaller number in the writeup.
-EXPECTED_INJECTORS = {
+#: The cards with a working injector, locked so a silent regression in the
+#: registry shows up as a test failure rather than as a smaller number in the
+#: writeup. Eight from Day 2, seven agentic cards from Day 3.
+DAY2_INJECTORS = {
     "F2-13",
     "F2-16",
     "F3-19",
@@ -56,6 +57,22 @@ EXPECTED_INJECTORS = {
     "F6-39",
     "F6-40",
 }
+
+#: Day 3: the F1 family, mandate and delegation abuse. These are the reason the
+#: project exists, and they are the ones that may legitimately break a mandate
+#: rule -- so several assertions below are scoped to exclude them by name rather
+#: than being loosened for everybody.
+DAY3_AGENTIC_INJECTORS = {
+    "F1-01",
+    "F1-02",
+    "F1-03",
+    "F1-04",
+    "F1-05",
+    "F1-09",
+    "F1-10",
+}
+
+EXPECTED_INJECTORS = DAY2_INJECTORS | DAY3_AGENTIC_INJECTORS
 
 
 @pytest.fixture(scope="module")
@@ -220,20 +237,28 @@ def test_attacks_stay_inside_the_observation_window(
 
 
 def test_agentic_attack_rows_carry_a_coherent_mandate(attacks: dict[str, pd.DataFrame]) -> None:
-    """None of these eight is a mandate-abuse attack, so none may look like one.
+    """An attack that is not a mandate attack must not look like one.
 
     If a retargeted row left its scope ceiling below the amount, L0 would catch
     the whole campaign on a rule these attacks are not supposed to trip, and the
-    F1 injectors landing later would have nothing left to demonstrate.
+    F1 injectors would have nothing left to demonstrate.
+
+    Scoped to the non-F1 cards **by name**. The F1 family is where mandate abuse
+    lives, and ``tests/test_agentic_injectors.py`` holds each of those to its
+    declared bucket instead -- CLEAN injectors are asserted to satisfy every
+    clause here, HARD ones are asserted to violate the specific clause their card
+    names. Loosening this test for everybody would have been the easy fix and the
+    wrong one: it is the assertion that stops a Day 2 injector from quietly
+    becoming a free L0 catch.
     """
     for card_id, frame in attacks.items():
+        if card_id in DAY3_AGENTIC_INJECTORS:
+            continue
         agentic = frame[frame["channel"] == "agentic"]
         if agentic.empty:
             continue
         assert (agentic["ag_scope_max_amount"] >= agentic["amount"]).all(), card_id
-        in_scope = [
-            str(row.mcc) in list(row.ag_scope_categories) for row in agentic.itertuples()
-        ]
+        in_scope = [str(row.mcc) in list(row.ag_scope_categories) for row in agentic.itertuples()]
         assert all(in_scope), card_id
         named = agentic[agentic["ag_scope_allowed_merchants"].map(len) > 0]
         assert all(
@@ -274,10 +299,22 @@ def test_card_present_rows_keep_their_nullity_pattern(attacks: dict[str, pd.Data
 def test_overall_prevalence_is_realistic(
     attacks: dict[str, pd.DataFrame], background: pd.DataFrame
 ) -> None:
-    """Well under 1%. A toy class balance makes every downstream metric a lie."""
+    """Card-fraud shaped. A toy class balance makes every downstream metric a lie.
+
+    The band widened from 1% to 1.5% on Day 3, and the reason is arithmetic
+    rather than convenience: prevalence is the sum over implemented cards, and
+    the card count went from eight to fifteen. Each injector's own volume was
+    held roughly constant, so the total moved. What must never happen -- and what
+    this test exists to catch -- is drift toward a balanced dataset, where
+    AUC-PR stops meaning anything and recall@0.1%FPR stops being hard.
+
+    Real card fraud is single-digit basis points. At ~1% we are already an order
+    of magnitude above reality, deliberately, so that per-card recall is
+    measurable at all. Two orders would be a toy.
+    """
     fraud = sum(len(frame) for frame in attacks.values())
     prevalence = fraud / (len(background) + fraud)
-    assert 0.001 < prevalence < 0.01, f"prevalence {prevalence:.4%} is not card-fraud shaped"
+    assert 0.001 < prevalence < 0.015, f"prevalence {prevalence:.4%} is not card-fraud shaped"
 
 
 @pytest.mark.parametrize("card_id", sorted(EXPECTED_INJECTORS))
@@ -289,8 +326,17 @@ def test_no_single_feature_separates_an_attack(
     Small-sample AUCs are noisier than the headline numbers in each injector's
     docstring (those come from a 200k background), so this asserts the gate
     rather than the exact value.
+
+    Measured inside the injector's **declared slice** where it declares one --
+    see ``BaseAttack.probe_slice``. Unconditionally, any attack carrying an
+    agentic block scores ~0.92 on the nullity of any ``ag_`` column and any
+    refund attack ~0.99 on ``txn_type``, because those are the attack's
+    definition rather than evidence of it. The conditional number is the one
+    that says whether an attack is a cartoon.
     """
-    ranked = probe_attack(background, attacks[card_id], max_negatives=25_000, seed=7)
+    mask = get_injector(card_id).probe_slice(background)
+    negatives = background if mask is None else background[mask]
+    ranked = probe_attack(negatives, attacks[card_id], max_negatives=25_000, seed=7)
     best = ranked.iloc[0]
     assert best["auc"] <= GATE_AUC, (
         f"{card_id} is a cartoon: {best['feature']} alone scores {best['auc']:.3f}"
@@ -305,10 +351,50 @@ def test_probe_matrix_never_leaks_a_label(background: pd.DataFrame) -> None:
     assert not matrix.isna().to_numpy().any(), "a NaN column would be silently unmeasurable"
 
 
-def test_attacks_are_not_confined_to_one_rail(attacks: dict[str, pd.DataFrame]) -> None:
-    """A single-rail attack makes ``channel`` the answer and the model useless."""
+def test_attack_rails_agree_with_the_card(attacks: dict[str, pd.DataFrame]) -> None:
+    """Every rail an injector uses must be one its atlas card claims.
+
+    This replaces a blanket "at least two channels" rule, which was right for
+    the Day 2 cards and wrong as a universal: F1-02 and F1-10 name ``agentic``
+    alone, because an intent mandate and a replayed mandate artefact only exist
+    on the agentic rail. Demanding a second channel there would have forced the
+    injector to emit something its own card says is impossible.
+
+    The stronger check is the one that replaces it: the injector may not ride a
+    rail the card does not claim, and a card claiming several must use several.
+    That makes the card's ``rails`` list executable in the same way ``generator``
+    already is.
+
+    **Known gap, recorded rather than papered over.** The subset relation is
+    asserted for the Day 3 F1 cards only. Writing this test surfaced a real
+    pre-existing inconsistency: several Day 2 injectors clone whatever rail their
+    source row was on and therefore ride rails their card does not list -- F2-13
+    reaches ``card_present``, ``recurring`` and ``upi_p2p`` against a card naming
+    ``agentic``/``ecom``/``upi_p2m``. That is a Day 2 card/injector reconciliation,
+    not a Day 3 one, and quietly widening seven cards to make a new test pass
+    would be the wrong way round. It is listed in CLAUDE.md section 8 as
+    outstanding.
+    """
     for card_id, frame in attacks.items():
-        assert frame["channel"].nunique() >= 2, card_id
+        claimed = set(ATLAS[card_id].rails)
+        used = set(frame["channel"])
+
+        if card_id in DAY3_AGENTIC_INJECTORS:
+            # Strong form, for the cards whose injector and ``rails`` list were
+            # written together.
+            assert used <= claimed, f"{card_id} rides {sorted(used - claimed)}, not on its card"
+
+        if len(claimed) > 1:
+            assert len(used) >= 2, (
+                f"{card_id} claims {sorted(claimed)} but only uses {sorted(used)}"
+            )
+        else:
+            # A card naming one rail must use exactly it. F1-02, F1-04, F1-05 and
+            # F1-10 name ``agentic`` alone, because an intent mandate and a
+            # replayed mandate artefact only exist there.
+            assert used == claimed, (
+                f"{card_id} claims only {sorted(claimed)} but rides {sorted(used)}"
+            )
 
 
 # --------------------------------------------------------------------------- #

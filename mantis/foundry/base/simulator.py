@@ -42,6 +42,23 @@ Four modelling choices worth defending out loud
    favourites drawn from their home metro, so ``merchant_novelty_for_customer``
    and ``geo_distance_from_home_km`` have a believable baseline instead of
    flagging every second transaction.
+5. **Authorisations decline, money comes back, and clearing lags.** Schema
+   amendment 1.1.0 (Day 3) added the transaction lifecycle, and the population
+   now uses all of it: a per-channel decline rate that rises with the ticket,
+   legitimate refunds and reversals bound to the purchases they reverse,
+   pre-authorisation holds, a basis-point dispute rate, and settlement lag that
+   is genuinely **bimodal** — card rails clear on tomorrow's acquirer file, UPI
+   clears in seconds. Every one of those exists to deny a detector a free win:
+   without a decline population, F4-27's approve/decline oracle would be a
+   generator artefact; without instant-settling legitimate rails, F1-03's
+   instant refunds would be separable on ``settlement_lag_hours`` alone.
+
+Refunds and reversals are **conversions, not additions**. A refund row takes over
+the identity of a row that would otherwise have been a purchase, and copies its
+target (customer, merchant, category, rail, credential, geography) from a real
+earlier purchase in the same file. Two consequences we rely on: the event count
+stays exactly ``n_events``, and the marginals stay calibrated, because the source
+purchase was itself a draw from the population being calibrated.
 
 Timestamps are IST (UTC+05:30, no DST) so that the hour-of-day curve means what
 it says for an Indian population.
@@ -59,12 +76,15 @@ import numpy as np
 
 from mantis.core.events import (
     AgenticContext,
+    AuthResponse,
     Channel,
+    DisputeOutcome,
     EntryMode,
     MandateScope,
     MandateType,
     ThreeDSResult,
     TxEvent,
+    TxnType,
 )
 from mantis.foundry.base.entities import MAX_AGENTS, MAX_DOMAINS, Population, build_population
 from mantis.foundry.base.reference import ReferenceStats, load_reference_stats
@@ -108,6 +128,43 @@ _ROUND_HEAVY_MCCS: Final[frozenset[str]] = frozenset({"5541", "6012", "4814"})
 #: Legitimate-but-messy tails. See modelling choice 1 in the module docstring.
 _KYA_REGISTERED_P: Final[float] = 0.972
 _CONSENT_VALID_P: Final[float] = 0.997
+
+#: Entry modes that actually carry a card verification value. A
+#: ``declined_invalid_cvv`` on a contactless tap or a network token would be an
+#: impossible combination, and an impossible combination is a feature a model
+#: will happily memorise and a judge will immediately spot.
+_CVV_ENTRY_MODES: Final[frozenset[str]] = frozenset({EntryMode.ECOM_KEYED.value})
+
+#: Entry modes that can expire: a stored credential can go stale, a token that
+#: the network refreshes cannot.
+_EXPIRABLE_ENTRY_MODES: Final[frozenset[str]] = frozenset(
+    {EntryMode.ECOM_KEYED.value, EntryMode.CREDENTIAL_ON_FILE.value, EntryMode.MAGSTRIPE.value}
+)
+
+#: How far back from the drawn refund time we look for the purchase being
+#: refunded, in seconds. The source has to be a real earlier row, so the window
+#: is a band rather than "anything earlier": that keeps the realised refund lag
+#: close to ``refund_lag_median_hours`` instead of averaging the whole file.
+_REFUND_SOURCE_BAND_S: Final[int] = 36 * 3_600
+
+#: Reversals cancel an authorisation in the same sitting.
+_REVERSAL_LAG_MEDIAN_S: Final[float] = 2.5 * 3_600
+_REVERSAL_SOURCE_BAND_S: Final[int] = 3 * 3_600
+
+#: Partial refunds return this fraction of the original.
+_PARTIAL_REFUND_RANGE: Final[tuple[float, float]] = (0.15, 0.92)
+
+#: A pre-authorisation hold that is never captured. Fuel and hotel holds expire.
+_PREAUTH_UNCAPTURED_P: Final[float] = 0.31
+
+#: Days from a settled purchase to the cardholder disputing it.
+_DISPUTE_LAG_MEDIAN_DAYS: Final[float] = 16.0
+_DISPUTE_LAG_SIGMA: Final[float] = 0.85
+
+#: Ceiling on the per-row decline probability after the amount tilt is applied.
+#: Without it a six-sigma ticket would decline with near-certainty, which would
+#: make ``amount`` a proxy for ``auth_response`` and hand the probe a shortcut.
+_MAX_DECLINE_P: Final[float] = 0.55
 
 
 def _stable_uniform(*columns: np.ndarray) -> np.ndarray:
@@ -229,6 +286,14 @@ class _Draws:
     lat: np.ndarray
     lon: np.ndarray
     epoch: np.ndarray
+    # transaction lifecycle (schema amendment 1.1.0)
+    txn_type: np.ndarray
+    auth_response: np.ndarray
+    original_index: np.ndarray  # position of the refunded/reversed row, -1 for none
+    settled: np.ndarray
+    settlement_lag_hours: np.ndarray  # NaN where unsettled
+    dispute_outcome: np.ndarray  # None where undisputed
+    dispute_lag_seconds: np.ndarray  # -1 where undisputed
     # agentic-only columns, meaningful where ``is_agentic``
     mandate_type: np.ndarray
     mandate_ttl: np.ndarray
@@ -333,6 +398,192 @@ def _draw_amounts(
     return np.clip(amount, 1.0, None)
 
 
+def _apply_lifecycle(
+    rng: np.random.Generator,
+    stats: ReferenceStats,
+    cols: dict[str, np.ndarray],
+) -> dict[str, np.ndarray]:
+    """Assign transaction type, authorisation outcome, settlement and disputes.
+
+    ``cols`` holds the identity columns drawn so far and is **mutated in place**
+    for the rows that become refunds or reversals: those take over the target of
+    a real earlier purchase (customer, merchant, category, rail, credential,
+    geography), because a refund is not an independent event — it is the same
+    relationship running backwards. Everything else about the row, including its
+    own timestamp and its own mandate, stays its own.
+
+    Returns the lifecycle columns; the caller stitches them into ``_Draws``.
+
+    Ordering note: this runs *after* timestamps and *before* the agentic flags,
+    so mandate ceilings and deliberation latency are drawn against the amount the
+    row actually ends up carrying rather than the purchase amount it discarded.
+    """
+    epoch = cols["epoch"]
+    amount = cols["amount"]
+    channel = cols["channel"]
+    entry_mode = cols["entry_mode"]
+    n = epoch.size
+
+    # -- what kind of message is this ---------------------------------------- #
+    # One categorical draw. Shares are of the whole file, so the arithmetic a
+    # judge does on the printed counts is the arithmetic we did here.
+    edges = np.cumsum(
+        [stats.refund_share, stats.reversal_share, stats.credit_share, stats.preauth_share]
+    )
+    roll = rng.random(n)
+    txn_type = np.full(n, TxnType.PURCHASE.value, dtype=object)
+    txn_type[roll < edges[3]] = TxnType.PREAUTH.value
+    txn_type[roll < edges[2]] = TxnType.CREDIT.value
+    txn_type[roll < edges[1]] = TxnType.REVERSAL.value
+    txn_type[roll < edges[0]] = TxnType.REFUND.value
+
+    original_index = np.full(n, -1, dtype=np.int64)
+
+    # -- bind refunds and reversals to a real earlier purchase ---------------- #
+    # Candidate sources are the rows still headed for ``purchase``, indexed by
+    # time so a source can be found with two searchsorted calls per row.
+    pool = np.flatnonzero(txn_type == TxnType.PURCHASE.value)
+    pool = pool[np.argsort(epoch[pool], kind="stable")]
+    pool_epochs = epoch[pool]
+
+    for kind, median_s, band_s in (
+        (TxnType.REFUND.value, stats.refund_lag_median_hours * 3_600.0, _REFUND_SOURCE_BAND_S),
+        (TxnType.REVERSAL.value, _REVERSAL_LAG_MEDIAN_S, _REVERSAL_SOURCE_BAND_S),
+    ):
+        rows = np.flatnonzero(txn_type == kind)
+        if not rows.size:
+            continue
+        lag = rng.lognormal(np.log(median_s), 0.7, rows.size)
+        target = epoch[rows] - lag
+        hi = np.searchsorted(pool_epochs, target, side="right")
+        lo = np.searchsorted(pool_epochs, target - band_s, side="left")
+        for k, row in enumerate(rows):
+            top, bottom = int(hi[k]), int(lo[k])
+            if top <= 0:
+                # Too early in the window for anything to refund. Stays a
+                # purchase rather than being forced -- a file whose first days
+                # carry refunds of nothing would be its own tell.
+                txn_type[row] = TxnType.PURCHASE.value
+                continue
+            if bottom >= top:
+                bottom = 0
+            original_index[row] = pool[rng.integers(bottom, top)]
+
+    bound = np.flatnonzero(original_index >= 0)
+    if bound.size:
+        src = original_index[bound]
+        # The refund inherits the purchase's target, not its own.
+        for column in (
+            "customer",
+            "mcc",
+            "mcc_index",
+            "is_agentic",
+            "channel",
+            "merchant",
+            "entry_mode",
+            "threeds",
+            "card_slot",
+            "device_slot",
+            "agent_slot",
+            "terminal_no",
+            "ip_host",
+            "lat",
+            "lon",
+        ):
+            cols[column][bound] = cols[column][src]
+
+        src_amount = amount[src]
+        full = (rng.random(bound.size) < stats.refund_full_share) | (
+            txn_type[bound] == TxnType.REVERSAL.value
+        )
+        ratio = np.where(full, 1.0, rng.uniform(*_PARTIAL_REFUND_RANGE, bound.size))
+        amount[bound] = np.round(np.clip(src_amount * ratio, 1.0, None), 2)
+        channel = cols["channel"]
+        entry_mode = cols["entry_mode"]
+
+    # -- approve or decline --------------------------------------------------- #
+    # Only the inbound flows are declined. A refund or a reversal is the issuer
+    # putting money back; it does not fail for want of funds.
+    log_amount = np.log1p(amount)
+    z = (log_amount - log_amount.mean()) / max(float(log_amount.std()), 1e-9)
+    base = np.asarray([stats.decline_rate[str(c)] for c in channel], dtype=float)
+    p_decline = np.clip(base * np.exp(stats.decline_amount_tilt * z), 0.0, _MAX_DECLINE_P)
+    declinable = np.isin(txn_type, [TxnType.PURCHASE.value, TxnType.PREAUTH.value])
+    declined = declinable & (rng.random(n) < p_decline)
+
+    reasons = np.array(list(stats.decline_reason_weights), dtype=object)
+    reason_p = np.asarray(list(stats.decline_reason_weights.values()), dtype=float)
+    auth_response = np.full(n, AuthResponse.APPROVED.value, dtype=object)
+    idx = np.flatnonzero(declined)
+    if idx.size:
+        drawn = reasons[rng.choice(len(reasons), size=idx.size, p=reason_p)]
+        # Remap reasons the credential could not have produced. Doing this after
+        # the draw (rather than with a per-entry-mode table) keeps the overall
+        # reason mix close to the prior while making every individual row
+        # possible -- an impossible combination is a memorisable artefact.
+        no_cvv = ~np.isin(entry_mode[idx], list(_CVV_ENTRY_MODES))
+        drawn[no_cvv & (drawn == AuthResponse.DECLINED_INVALID_CVV.value)] = (
+            AuthResponse.DECLINED_DO_NOT_HONOR.value
+        )
+        fresh = ~np.isin(entry_mode[idx], list(_EXPIRABLE_ENTRY_MODES))
+        drawn[fresh & (drawn == AuthResponse.DECLINED_EXPIRED.value)] = (
+            AuthResponse.DECLINED_INSUFFICIENT_FUNDS.value
+        )
+        auth_response[idx] = drawn
+
+    # -- clearing -------------------------------------------------------------- #
+    settled = ~declined
+    # A reversal cancels the hold, so nothing clears. A share of pre-auths is
+    # never captured, and a thin tail of ordinary approvals has not cleared by
+    # the end of the window.
+    settled &= txn_type != TxnType.REVERSAL.value
+    preauth = txn_type == TxnType.PREAUTH.value
+    settled &= ~(preauth & (rng.random(n) < _PREAUTH_UNCAPTURED_P))
+    settled &= rng.random(n) >= stats.unsettled_share
+
+    median_lag = np.asarray([stats.settlement_lag_median_hours[str(c)] for c in channel])
+    # A share of refunds clears in minutes: instant refunds are a real merchant
+    # offering. Without this tail, "this credit settled immediately" would be a
+    # 0.99-AUC single-column detector for F1-03 -- a property of our file rather
+    # than of the attack.
+    instant = (txn_type == TxnType.REFUND.value) & (rng.random(n) < stats.refund_instant_share)
+    median_lag = np.where(instant, np.clip(median_lag, 0.0, 0.35), median_lag)
+    lag_hours = rng.lognormal(np.log(np.maximum(median_lag, 1e-4)), stats.settlement_lag_sigma, n)
+    settlement_lag_hours = np.where(settled, np.round(lag_hours, 3), np.nan)
+
+    # -- disputes: post-hoc, basis points, never a feature ---------------------- #
+    disputable = settled & (txn_type == TxnType.PURCHASE.value)
+    raised = disputable & (rng.random(n) < stats.dispute_rate)
+    dispute_outcome = np.full(n, None, dtype=object)
+    dispute_lag_seconds = np.full(n, -1, dtype=np.int64)
+    idx = np.flatnonzero(raised)
+    if idx.size:
+        unresolved = rng.random(idx.size) < stats.dispute_unresolved_share
+        cardholder = rng.random(idx.size) < stats.dispute_won_cardholder_share
+        outcome = np.where(
+            unresolved,
+            DisputeOutcome.RAISED.value,
+            np.where(
+                cardholder,
+                DisputeOutcome.WON_CARDHOLDER.value,
+                DisputeOutcome.WON_MERCHANT.value,
+            ),
+        )
+        dispute_outcome[idx] = outcome
+        days = rng.lognormal(np.log(_DISPUTE_LAG_MEDIAN_DAYS), _DISPUTE_LAG_SIGMA, idx.size)
+        dispute_lag_seconds[idx] = np.maximum(3_600, (days * 86_400).astype(np.int64))
+
+    return {
+        "txn_type": txn_type,
+        "auth_response": auth_response,
+        "original_index": original_index,
+        "settled": settled,
+        "settlement_lag_hours": settlement_lag_hours,
+        "dispute_outcome": dispute_outcome,
+        "dispute_lag_seconds": dispute_lag_seconds,
+    }
+
+
 def _draw_agentic_flags(
     rng: np.random.Generator, stats: ReferenceStats, is_agentic: np.ndarray, amount: np.ndarray
 ) -> dict[str, np.ndarray]:
@@ -366,13 +617,22 @@ def _draw_agentic_flags(
 
     # Machine-like by default. Human oversight puts a real hand on a real device,
     # which is the gap F1-09 has to forge.
+    #
+    # ...except when it does not. A share of genuinely supervised sessions are
+    # *passive*: the person is watching the agent work and never touches the
+    # device, so the telemetry is machine-like while ``human_present`` is
+    # honestly true. This tail is deliberate and load-bearing. Without it the
+    # pair (human_present=True, low cursor_entropy) would be a perfect
+    # deterministic detector for F1-09, and we would be reporting a property of
+    # this file rather than a property of spoofing.
+    hands_on = human_present & (rng.random(n) >= stats.human_present_passive_share)
     cursor = np.where(
-        human_present,
+        hands_on,
         rng.lognormal(np.log(2.4), 0.40, n),
         rng.lognormal(np.log(0.42), 0.45, n),
     )
     dwell = np.where(
-        human_present,
+        hands_on,
         rng.lognormal(np.log(6_200), 0.60, n),
         rng.lognormal(np.log(850), 0.45, n),
     ).astype(np.int64)
@@ -393,7 +653,11 @@ def _draw_agentic_flags(
         "human_present": human_present,
         "kya_registered": rng.random(n) < _KYA_REGISTERED_P,
         "consent_valid": rng.random(n) < _CONSENT_VALID_P,
-        "delegation_depth": rng.choice([1, 2, 3], size=n, p=[0.82, 0.16, 0.02]),
+        "delegation_depth": rng.choice(
+            np.asarray([int(k) for k in stats.delegation_depth_weights], dtype=np.int64),
+            size=n,
+            p=np.asarray(list(stats.delegation_depth_weights.values()), dtype=float),
+        ),
         "tool_calls": 2 + rng.poisson(4.0, n),
         "deliberation_ms": np.clip(deliberation, 120, None),
         "cursor_entropy": np.round(cursor, 3),
@@ -544,26 +808,51 @@ def _draw(cfg: SimulationConfig, stats: ReferenceStats, pop: Population) -> _Dra
     epoch = _draw_timestamps(rng, stats, cfg, is_agentic)
     epoch = _apply_session_bursts(rng, stats, customer, epoch)
 
-    agentic_cols = _draw_agentic_flags(rng, stats, is_agentic, amount)
+    # -- what happened to it ------------------------------------------------------ #
+    # Refunds and reversals rewrite the identity columns of the rows they land
+    # on, so this has to run before the agentic block is drawn against them.
+    cols = {
+        "customer": customer,
+        "mcc": mcc,
+        "mcc_index": mcc_index,
+        "is_agentic": is_agentic,
+        "channel": channel,
+        "merchant": merchant,
+        "amount": amount,
+        "entry_mode": entry_mode,
+        "threeds": threeds,
+        "card_slot": card_slot,
+        "device_slot": device_slot,
+        "agent_slot": agent_slot,
+        "terminal_no": terminal_no,
+        "ip_host": ip_host,
+        "lat": lat,
+        "lon": lon,
+        "epoch": epoch,
+    }
+    lifecycle = _apply_lifecycle(rng, stats, cols)
+
+    agentic_cols = _draw_agentic_flags(rng, stats, cols["is_agentic"], cols["amount"])
 
     return _Draws(
-        customer=customer,
-        mcc=mcc,
-        mcc_index=mcc_index,
-        is_agentic=is_agentic,
-        channel=channel,
-        merchant=merchant,
-        amount=amount,
-        entry_mode=entry_mode,
-        threeds=threeds,
-        card_slot=card_slot,
-        device_slot=device_slot,
-        agent_slot=agent_slot,
-        terminal_no=terminal_no,
-        ip_host=ip_host,
-        lat=lat,
-        lon=lon,
-        epoch=epoch,
+        customer=cols["customer"],
+        mcc=cols["mcc"],
+        mcc_index=cols["mcc_index"],
+        is_agentic=cols["is_agentic"],
+        channel=cols["channel"],
+        merchant=cols["merchant"],
+        amount=cols["amount"],
+        entry_mode=cols["entry_mode"],
+        threeds=cols["threeds"],
+        card_slot=cols["card_slot"],
+        device_slot=cols["device_slot"],
+        agent_slot=cols["agent_slot"],
+        terminal_no=cols["terminal_no"],
+        ip_host=cols["ip_host"],
+        lat=cols["lat"],
+        lon=cols["lon"],
+        epoch=cols["epoch"],
+        **lifecycle,  # type: ignore[arg-type]
         **agentic_cols,  # type: ignore[arg-type]
     )
 
@@ -724,9 +1013,14 @@ def iter_events(
         card_present = channel is Channel.CARD_PRESENT
         lat, lon = float(d.lat[i]), float(d.lon[i])
 
+        ts = datetime.fromtimestamp(int(d.epoch[i]), tz=IST)
+        src = int(d.original_index[i])
+        dispute_lag = int(d.dispute_lag_seconds[i])
+        lag_hours = float(d.settlement_lag_hours[i])
+
         yield TxEvent(
             event_id=event_id,
-            ts=datetime.fromtimestamp(int(d.epoch[i]), tz=IST),
+            ts=ts,
             amount=float(d.amount[i]),
             currency=stats.currency,
             mcc=str(d.mcc[i]),
@@ -750,6 +1044,17 @@ def iter_events(
             lat=None if np.isnan(lat) else lat,
             lon=None if np.isnan(lon) else lon,
             threeds_result=ThreeDSResult(str(d.threeds[i])),
+            txn_type=TxnType(str(d.txn_type[i])),
+            auth_response=AuthResponse(str(d.auth_response[i])),
+            # The refunded purchase is identified by position, and event ids are
+            # a pure function of position, so the link needs no lookup table.
+            original_event_id=(None if src < 0 else f"evt-{cfg.seed:d}-{src:08d}"),
+            dispute_outcome=(
+                None if d.dispute_outcome[i] is None else DisputeOutcome(str(d.dispute_outcome[i]))
+            ),
+            dispute_raised_ts=(None if dispute_lag < 0 else ts + timedelta(seconds=dispute_lag)),
+            settled=bool(d.settled[i]),
+            settlement_lag_hours=(None if np.isnan(lag_hours) else lag_hours),
             agentic=agentic,
             is_fraud=False,
             attack_id=None,
@@ -773,6 +1078,9 @@ def simulate_frame(
     frame["ag_mandate_issued_ts"] = pd.to_datetime(
         frame["ag_mandate_issued_ts"], utc=True
     ).dt.tz_convert(IST)
+    frame["dispute_raised_ts"] = pd.to_datetime(frame["dispute_raised_ts"], utc=True).dt.tz_convert(
+        IST
+    )
     return frame
 
 
@@ -783,9 +1091,11 @@ def main() -> None:
     for ev in iter_events(cfg, stats):
         rail = ev.channel.value
         tag = f" agent={ev.agentic.agent_id}" if ev.agentic else ""
+        outcome = ev.auth_response.value if ev.auth_response is not AuthResponse.APPROVED else "ok"
         print(
             f"{ev.ts:%Y-%m-%d %H:%M} {rail:<13} mcc={ev.mcc} "
-            f"{stats.currency} {ev.amount:>10,.2f}  {ev.merchant_id:<20}{tag}"
+            f"{stats.currency} {ev.amount:>10,.2f}  {ev.txn_type.value:<9} "
+            f"{outcome:<28} {ev.merchant_id:<20}{tag}"
         )
 
 

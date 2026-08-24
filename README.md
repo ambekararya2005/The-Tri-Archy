@@ -20,3 +20,38 @@ India lost ₹22,495 crore to cyber fraud in 2025, with digital-payment fraud ca
 Unit 42 documented live prompt-injection attacks against shopping agents' cart mandates — and shipped no detection signatures with it. That gap is your product.
 The framing that does the work
 Do not present this as "we built a fraud classifier." Present it as: the rail Mastercard is building right now has no immune system, and here is how you grow one before the attackers arrive. Agent Pay, agentic tokens and "Know Your Agent" are Mastercard's own vocabulary — use it throughout. You are pitching to the people who own that roadmap.
+
+
+---
+
+## What runs today (Day 3)
+
+No network, no GPU, no API key, no Kaggle token. `make demo` is the acceptance test.
+
+```
+make install     # editable install plus dev tools
+make demo        # schema -> atlas -> corpus -> population -> dataset -> tests
+```
+
+Individual stages, each runnable on its own:
+
+| Command | What it prints |
+|---|---|
+| `make schema` | the frozen `TxEvent` contract, v1.1.0 |
+| `make atlas` | 42 vectors, and the **honest count** of how many have a working injector |
+| `make corpus` | the committed LLM content corpus, and one specimen of each kind |
+| `make population` | 200k calibrated legitimate authorisations + the calibration figure |
+| `make dataset` | the labelled dataset, class balance, per-attack counts, the separability table, and a full sample of what an agent read before it paid |
+| `make probe` | best-single-feature AUC per injector, against a small background |
+| `make test` | the suite |
+
+**Where it stands.** 42 vectors mapped, **15 with a working injector** — the atlas
+is a dependency of the generator, not documentation next to it, and
+`import mantis.foundry.injectors` fails if that ever stops being true. Seven of
+the fifteen are agentic mandate attacks, deliberately split so that two of them
+(F1-01 cart-mandate tampering, F1-03 refund-logic hijack) satisfy **every**
+protocol rule and can only be caught behaviourally or from the text the agent
+read. No attack in the dataset is separable by any single column.
+
+Still to come: the fidelity scorecard, the five-layer Mandate Firewall, the
+evolutionary adversary loop, and the live defence console.

@@ -34,11 +34,32 @@ Modelling decisions worth defending
   category and, across campaigns, across different BINs and rails — so the
   evidence is a per-entity aggregate, not a repeated merchant pair.
 
+How the boundary gets located (amendment 1.1.0)
+-----------------------------------------------
+Structuring presupposes that the operator *knows* where the line is, and until
+Day 3 this injector simply granted them that knowledge. With ``auth_response``
+in the schema, the discovery step is now modelled: each campaign opens with a
+short **calibration phase** of attempts placed deliberately *above* a candidate
+boundary, most of which come back ``declined_risk``. Those declines are the
+measurement. Everything after them sits just underneath the line that was found.
+
+Two properties this buys, neither of which existed before:
+
+* The attack now has a **temporal shape** — a small cluster of high, declined
+  attempts followed by a long tail of lower, approved ones — rather than being a
+  static amount distribution. That is a sequence feature, which is L1 and L4
+  territory, not something a single column can express.
+* ``declined_risk`` appears in the data at an elevated rate for exactly the
+  reason the card names. The background declines for risk on ~0.4% of events;
+  inside a calibration burst it is the modal outcome. The *whole-campaign* rate
+  stays modest, because calibration is a small share of the volume.
+
 Realism check (measured, not asserted)
 --------------------------------------
-Best single-feature depth-1 stump AUC: **0.801** (``amount``) — real and expected, since
-structuring does push tickets above a ₹782 median. It is still not separation:
-the boundary-hugging pattern lives in the *density* of amounts just under each
+Best single-feature depth-1 stump AUC: **see the probe table**. ``amount`` remains
+the strongest single column — real and expected, since structuring does push
+tickets above a Rs782 median — and it is still not separation: the
+boundary-hugging pattern lives in the *density* of amounts just under each
 threshold, which a single split cannot express.
 
 Measured by ``mantis.foundry.injectors.probe`` against a 200k-event background at
@@ -75,6 +96,20 @@ _RATIO_RANGE: tuple[float, float] = (0.84, 0.995)
 #: cannot be re-cut into five payments on demand, so structuring there would be
 #: an artefact of the generator rather than a technique.
 _RAILS: tuple[str, ...] = ("ecom", "agentic", "upi_p2m", "card_present")
+
+#: Share of a campaign spent locating the boundary rather than exploiting it.
+#: Small: calibration is cheap and needs few samples, and a campaign that was
+#: mostly declines would be caught by velocity long before structuring mattered.
+_CALIBRATION_SHARE: float = 0.14
+
+#: How far above the boundary a calibration attempt is placed. Close enough that
+#: an approval would be informative, far enough that a decline is unambiguous.
+_OVERSHOOT_RANGE: tuple[float, float] = (1.02, 1.35)
+
+#: Chance a calibration attempt above the boundary is refused. Not 1.0: a
+#: threshold is a risk score input, not a hard wall, and an operator who saw
+#: deterministic refusal would have located it in one attempt.
+_OVERSHOOT_DECLINE_P: float = 0.71
 
 
 def _sequence_within(owner: np.ndarray) -> np.ndarray:
@@ -144,7 +179,16 @@ class ThresholdProbeAttack(BaseAttack):
             )
             view.retarget(rows, merchants)
 
-            ratio = rng.uniform(*_RATIO_RANGE, n)
+            # The opening calibration attempts overshoot the boundary; the rest
+            # of the campaign hugs it from below.
+            calibrating = np.zeros(n, dtype=bool)
+            calibrating[: max(1, round(n * _CALIBRATION_SHARE))] = True
+
+            ratio = np.where(
+                calibrating,
+                rng.uniform(*_OVERSHOOT_RANGE, n),
+                rng.uniform(*_RATIO_RANGE, n),
+            )
             amount = threshold * ratio
             # Match the population's own round-number habit rather than emitting
             # a smooth band, which would itself be a tell.
@@ -160,6 +204,11 @@ class ThresholdProbeAttack(BaseAttack):
             # a scatter of unrelated events.
             sitting = rng.integers(0, 30 * 3_600, cohort.size)[owner]
             view.set_timestamps(rows, starts[c] + sitting + seq * gap, rng=rng, groups=owner)
+
+            # An attempt over the boundary is usually refused, and that refusal
+            # is the measurement the rest of the campaign is built on.
+            declined = calibrating & (rng.random(n) < _OVERSHOOT_DECLINE_P)
+            view.decline(rows, declined, "declined_risk")
 
             blocks.append(
                 view.finalise(
