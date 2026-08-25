@@ -198,6 +198,26 @@ def build_scorecard(
         seed=seed,
         exclude=adjudicate.ADJUDICATED_FEATURES,
     )
+    # What skipping the shape projection would have produced. Reported so the
+    # headline's constraints are a measured difference rather than a claim.
+    card["discriminator_naive"] = discriminator.discriminate_naive(
+        synthetic_common, real_common, seed=seed
+    )
+    # And what the AUC is actually made of: an ablation path, plus a
+    # cosmetic/structural verdict per feature.
+    card["discriminator_ablation_path"] = discriminator.ablation_path(
+        synthetic_shape, real_shape, seed=seed
+    )
+    card["feature_class"] = [
+        {
+            "feature": row["feature"],
+            "verdict": discriminator.classify(row["feature"])[0],
+            "reason": discriminator.classify(row["feature"])[1],
+            "alone_auc": row["alone_auc"],
+            "contribution_share": row.get("contribution_share", float("nan")),
+        }
+        for row in card["discriminator"]["per_feature"]
+    ]
     card["headline"] = _headline(card)
     return card
 
@@ -209,6 +229,8 @@ def _headline(card: dict[str, Any]) -> dict[str, Any]:
     return {
         "discriminator_auc": card["discriminator"]["auc"],
         "discriminator_auc_ablated": card["discriminator_ablated"]["auc"],
+        "discriminator_auc_naive": card["discriminator_naive"]["auc"],
+        "discriminator_top_features": card["discriminator"]["top_features"],
         "discriminator_target": discriminator.TARGET_AUC,
         "transfer_ratio": card["tstr"]["transfer_ratio"],
         "tstr_auc_pr": card["tstr"]["tstr"]["auc_pr"],

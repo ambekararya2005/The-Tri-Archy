@@ -14,6 +14,37 @@ to spare inside a Mastercard timeout after the network, the HSM and the account
 lookup have taken their share; a scorer that misses it does not get to decline
 the transaction, it gets bypassed.
 
+Two paths, because a firewall is not one deadline
+--------------------------------------------------
+Not every layer has to answer inside the authorisation window, and pretending
+they do is what makes the budget look unmeetable.
+
+**Inline (L0 + L1).** What must return before the issuer answers the acquirer,
+because it is what changes the *authorisation decision*: the deterministic
+protocol clauses, and the supervised score they escalate to. Both need only the
+event and backward-looking state.
+
+**Fast-follow (L3 text, L4 graph, fusion, policy).** What informs an action taken
+**after** the authorisation has been answered. The two actions that matter on the
+agentic rail are both post-authorisation in any real deployment:
+
+* **mandate revocation** — a mandate that has been used to read a poisoned page
+  is revoked so the *next* authorisation under it fails L0. Revocation is a
+  credential-lifecycle operation against the mandate registry, not a field in
+  the authorisation response.
+* **agent quarantine** — an agent whose identity component has fused with a ring
+  is suspended, which changes every future authorisation it attempts and none of
+  the one in flight.
+
+Both are seconds-to-minutes operations by nature. Holding an authorisation open
+while a TF-IDF classifier reads eleven web pages, to take an action that cannot
+be applied to that authorisation anyway, would be an architectural error rather
+than a performance one.
+
+So this script reports **both** paths, separately, and the inline one is the
+number the 50 ms budget actually governs. The full-stack number stays in the
+document because a reader is entitled to know what everything costs.
+
 What is measured, precisely
 ----------------------------
 **One event at a time, against warm state.** Not a batch divided by its row
@@ -119,6 +150,38 @@ SEED: Final[int] = 1337
 
 #: The authorisation-host budget this is measured against. See the docstring.
 DEFAULT_BUDGET_MS: Final[float] = 50.0
+
+#: Stages that must complete before the issuer answers the acquirer, because
+#: they are what changes the authorisation decision. L0's clauses need the event;
+#: L1 needs the event's features, which is every feature block plus the two
+#: stateful stores.
+INLINE_STAGES: Final[tuple[str, ...]] = (
+    "velocity",
+    "graph",
+    "transaction",
+    "entity",
+    "mandate",
+    "L0",
+    "L1",
+)
+
+#: Stages whose output drives a **post-authorisation** action -- mandate
+#: revocation, agent quarantine -- and which therefore do not sit inside the
+#: authorisation window. See the module docstring.
+#:
+#: `graph` appears in INLINE_STAGES rather than here because L1 consumes the 28
+#: `gph_` features: the graph pass is inline as a *feature source* even though
+#: L4's own ring findings drive a fast-follow action.
+#:
+#: `L2` is here because CLAUDE.md demotes it to a residual monitor and drift
+#: canary rather than a detector -- "has the shape of legitimate traffic moved"
+#: is a question about the stream, not about the authorisation in flight.
+#:
+#: `fusion+policy` is here because the fused score is what the *review queue* and
+#: the revocation logic read. The inline decision is L0's clauses plus L1's own
+#: threshold; a fused score that waits on L2 and L3 cannot be inline by
+#: definition, since two of its inputs are not.
+FOLLOW_STAGES: Final[tuple[str, ...]] = ("L2", "L3", "fusion+policy")
 
 #: Stages in the order an online scorer runs them. The order is the report's
 #: order too, because a reader should see where the time goes along the path.
@@ -265,6 +328,7 @@ def main(argv: list[str] | None = None) -> int:
 
     per_stage: dict[str, list[float]] = {name: [] for name in STAGES}
     totals: list[float] = []
+    inline_totals: list[float] = []
 
     for offset in range(n):
         i = start + offset
@@ -345,6 +409,12 @@ def main(argv: list[str] | None = None) -> int:
         per_stage["fusion+policy"].append(time.perf_counter() - mark)
 
         totals.append(time.perf_counter() - event_started)
+        # Summed from the per-stage clocks rather than wrapped in its own timer:
+        # the inline path is a subset of the same single pass, and re-timing it
+        # would double-count the work.
+        inline_totals.append(
+            sum(per_stage[name][-1] for name in INLINE_STAGES)
+        )
 
     # --------------------------------------------------------- batch timing ---
     # The same stages over the same events, called once with the whole block.
@@ -389,6 +459,22 @@ def main(argv: list[str] | None = None) -> int:
     # -------------------------------------------------------------- report ---
     total_ms = np.asarray(totals) * 1000.0
     end_to_end = _percentiles(total_ms)
+    # The split must be a partition of STAGES. Computing fast-follow by
+    # subtraction would let a stage in neither tuple vanish into it silently,
+    # which is how L2 -- 40% of the clock -- spent one run mislabelled.
+    assert set(INLINE_STAGES) | set(FOLLOW_STAGES) == set(STAGES), (
+        "INLINE_STAGES and FOLLOW_STAGES must partition STAGES; "
+        f"unassigned: {set(STAGES) - set(INLINE_STAGES) - set(FOLLOW_STAGES)}"
+    )
+    assert not set(INLINE_STAGES) & set(FOLLOW_STAGES), "a stage cannot be in both paths"
+
+    inline = _percentiles(np.asarray(inline_totals) * 1000.0)
+    follow = _percentiles(
+        np.asarray(
+            [sum(per_stage[name][i] for name in FOLLOW_STAGES) for i in range(n)]
+        )
+        * 1000.0
+    )
     stages = {
         name: _percentiles(np.asarray(values) * 1000.0) for name, values in per_stage.items()
     }
@@ -427,15 +513,45 @@ def main(argv: list[str] | None = None) -> int:
     print()
 
     passed = end_to_end["p99"] <= args.budget
+    inline_passed = inline["p99"] <= args.budget
     headroom = args.budget / end_to_end["p99"] if end_to_end["p99"] else float("inf")
-    verdict = "WITHIN BUDGET" if passed else "OVER BUDGET"
-    print(f"  budget {args.budget:.0f} ms")
+    inline_headroom = args.budget / inline["p99"] if inline["p99"] else float("inf")
+
+    print("  Two paths, because a firewall is not one deadline")
+    print("  " + "-" * 48)
+    print(f"  {'path':<34} {'p50':>9} {'p95':>9} {'p99':>9}")
+    print(f"  {'-' * 34} {'-' * 9} {'-' * 9} {'-' * 9}")
     print(
-        f"  p99, one event at a time     {end_to_end['p99']:>9.2f} ms   {verdict}"
+        f"  {'INLINE  L0+L1, pre-auth':<34} {inline['p50']:>8.2f}ms "
+        f"{inline['p95']:>8.2f}ms {inline['p99']:>8.2f}ms"
+    )
+    print(
+        f"  {'FAST-FOLLOW  L2+L3+fusion, post-auth':<34} {follow['p50']:>8.2f}ms "
+        f"{follow['p95']:>8.2f}ms {follow['p99']:>8.2f}ms"
+    )
+    print(
+        f"  {'FULL STACK':<34} {end_to_end['p50']:>8.2f}ms "
+        f"{end_to_end['p95']:>8.2f}ms {end_to_end['p99']:>8.2f}ms"
+    )
+    print()
+    print(f"  budget {args.budget:.0f} ms, and it governs the INLINE path")
+    print(
+        f"  inline p99                   {inline['p99']:>9.2f} ms   "
+        f"{'WITHIN BUDGET' if inline_passed else 'OVER BUDGET'}"
+        + (f"  ({inline_headroom:.1f}x headroom)" if inline_passed else "")
+    )
+    print(
+        f"  full-stack p99               {end_to_end['p99']:>9.2f} ms   "
+        f"{'WITHIN BUDGET' if passed else 'OVER BUDGET'}"
         + (f"  ({headroom:.1f}x headroom)" if passed else "")
     )
     print(f"  same stages, per row in batch{batch_total:>9.4f} ms")
     print(f"  max observed                 {end_to_end['max']:>9.2f} ms over {n:,} events")
+    print()
+    print("  The fast-follow layers drive mandate revocation and agent quarantine, both")
+    print("  of which are post-authorisation actions against the mandate registry and the")
+    print("  agent directory - they cannot be applied to the authorisation in flight, so")
+    print("  holding it open for them would be an architectural error, not a slow one.")
     print()
 
     # The stage that dominates the clock, not the one with the largest ratio. A
@@ -476,6 +592,12 @@ def main(argv: list[str] | None = None) -> int:
         "within_budget": bool(passed),
         "headroom": float(headroom),
         "end_to_end_ms": end_to_end,
+        "inline_ms": inline,
+        "fast_follow_ms": follow,
+        "inline_stages": list(INLINE_STAGES),
+        "follow_stages": list(FOLLOW_STAGES),
+        "inline_within_budget": bool(inline_passed),
+        "inline_headroom": float(inline_headroom),
         "stages_ms": stages,
         "batch_per_row_ms": batch_ms,
         "batch_total_per_row_ms": batch_total,

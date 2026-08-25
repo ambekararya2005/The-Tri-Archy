@@ -305,6 +305,8 @@ Every detection figure above is measured on data this project generated, which m
 | population calibration | `indian-market-priors` |
 | discriminator, all shape features | **0.9994** (target 0.5) |
 | discriminator, adjudicated axes removed | **0.8399** |
+| discriminator, raw columns (ids + currency) | 0.9999 (expected; not a finding) |
+| top driver | `merchant_rank_pct`, 71% of contribution |
 | TSTR transfer ratio | 0.030 |
 | correlation-matrix RMS error | 0.076 |
 
@@ -370,16 +372,64 @@ Label the synthetic rows 1, the real rows 0, and fit a gradient-boosted tree on 
 
 Result: **0.9994** (99.9% separable). Separable at 100%. On these features the synthetic population is not passing for the reference panel, and the scorecard says so.
 
-| feature | separable alone (AUC) | gain share |
+#### What it was allowed to see
+
+A discriminator handed the raw columns of two payment files separates them at 1.0 and tells you nothing. Identifiers are namespaced differently on each side; the reference panel predates agentic commerce, so **every row carrying an `ag_` block is definitionally separable**; and an amount in rupees is not an amount in dollars. Counting any of that as infidelity would be the same error `BaseAttack.probe_slice` fixed on Day 3 — measuring a property that *defines* the two populations rather than one that distinguishes their behaviour.
+
+So the headline number is measured on the **intersection** of what both panels carry, with identity-shaped columns excluded by construction, the agentic rail dropped from the synthetic side, and every survivor made dimensionless. Both numbers, labelled:
+
+| input | AUC | what it means |
 |---|---|---|
-| `merchant_rank_pct` | 0.8288 | 79.3% |
-| `hour` | 0.5643 | 7.3% |
-| `gap_ratio_log` | 0.5302 | 3.2% |
-| `burst_1h` | 0.5211 | 1.7% |
-| `amount_vs_customer` | 0.5170 | 5.4% |
-| `category_shift` | 0.5075 | 0.1% |
-| `dow` | 0.5056 | 0.3% |
-| `log_amount_z` | 0.5002 | 2.7% |
+| raw columns — ids, currencies and taxonomies included | 0.9999 | expected, and **not a finding**: two identifier namespaces separate at 1.0 by themselves |
+| shape space — intersection, ids dropped, agentic excluded | **0.9994** | the headline |
+
+**The discipline bought almost nothing, and that is the important result.** If the 0.9994 had been an artefact of identifiers or currency, removing them would have collapsed it. It did not move. The separation is real, and it is in behaviour rather than in formatting.
+
+#### What drives it
+
+Attribution is LightGBM's native `pred_contrib` — the same quantity `TreeExplainer` computes, read from the source SHAP would have called. Ranked by mean absolute contribution; `alone` is the feature's own rank-AUC against the panel label.
+
+| feature | alone (AUC) | gain | contribution | class |
+|---|---|---|---|---|
+| `merchant_rank_pct` | 0.8288 | 79.3% | 70.7% | structural |
+| `amount_vs_customer` | 0.5170 | 5.4% | 7.0% | structural |
+| `hour` | 0.5643 | 7.3% | 6.0% | cosmetic |
+| `gap_ratio_log` | 0.5302 | 3.2% | 5.6% | structural |
+| `burst_1h` | 0.5211 | 1.7% | 4.7% | structural |
+| `log_amount_z` | 0.5002 | 2.7% | 3.4% | cosmetic |
+| `dow` | 0.5056 | 0.3% | 2.1% | cosmetic |
+| `category_shift` | 0.5075 | 0.1% | 0.5% | structural |
+
+**Top five drivers:** `merchant_rank_pct`, `amount_vs_customer`, `hour`, `gap_ratio_log`, `burst_1h` — 4 of 5 structural.
+
+#### Cosmetic or structural, and why the distinction decides what to do
+
+**Cosmetic** is a surface property of how values were *rendered*: identifier shape, timestamp granularity, amount rounding. Changing it moves the discriminator without changing anything an attacker or a detector would experience. **Structural** is a property of the joint distribution — which merchants get the volume, how a cardholder's transactions cluster in time, how a ticket sits against their history. Fixing one of those means changing the generative model.
+
+Nothing below is a fix and nothing below is an excuse. A feature can be structural *and* adjudicated to the reference panel — `merchant_rank_pct` is both, and the two statements are independent.
+
+- **`merchant_rank_pct`** — *structural*. Which merchants carry the volume. Ours is Zipf (top 10% take 66%), the reference is near-uniform (14.6%). A property of the generative model, not of formatting -- and separately adjudicated to the reference, because real acceptance estates are heavy-tailed.
+- **`amount_vs_customer`** — *structural*. How a ticket sits against the cardholder's own history -- a joint property of the amount draw and the customer assignment, and the single most transferable fraud signal there is.
+- **`hour`** — *cosmetic*. Timestamp granularity at the coarsest scale: which hour a transaction is stamped with. The reference has no diurnal curve at all, ours does. Nothing about behaviour changes if the curve is reshaped -- it is when the generator chose to place events, and it is adjudicated to the reference for having no curve to compare against.
+- **`gap_ratio_log`** — *structural*. How a cardholder's transactions cluster in time relative to their own rhythm. Burstiness is a behavioural property and the arrival process that produces it is part of the generative model.
+- **`burst_1h`** — *structural*. The same arrival process read as a probability. 12.4% of our events follow another within the hour against 16.6% of the reference's.
+
+#### Is it one column, or the joint distribution?
+
+Drop the strongest feature, refit, re-score, repeat. A separation that lives in one column collapses on the first drop; one that lives in the joint distribution degrades gradually. Which of those is true decides whether there is a fix or a rebuild.
+
+| features left | AUC | dropped so far |
+|---|---|---|
+| 8 | 0.9994 | — |
+| 7 | 0.8833 | `merchant_rank_pct` |
+| 6 | 0.8416 | `merchant_rank_pct`, `gap_ratio_log` |
+| 5 | 0.7076 | `merchant_rank_pct`, `gap_ratio_log`, `amount_vs_customer` |
+| 4 | 0.6172 | `merchant_rank_pct`, `gap_ratio_log`, `amount_vs_customer`, `hour` |
+| 3 | 0.5883 | `merchant_rank_pct`, `gap_ratio_log`, `amount_vs_customer`, `hour`, `dow` |
+| 2 | 0.5231 | `merchant_rank_pct`, `gap_ratio_log`, `amount_vs_customer`, `hour`, `dow`, `log_amount_z` |
+
+**It degrades gradually.** Removing the single strongest feature takes the AUC from 0.9994 to 0.8833 — still far above chance — and it takes dropping 6 of 8 features to reach 0.5231. So the separation is **not** one bad column that could be patched. It is distributed across the joint structure, which is the same thing the correlation-matrix distance measures, and it is the foundry's most substantial outstanding item rather than a cosmetic one.
+
 
 #### Which side is the anomalous one?
 
@@ -410,34 +460,55 @@ decline_amount_tilt multiplies the per-channel rate by exp(0.55 z), whose expect
 
 Measured **one event at a time** against state warmed on 282,968 training events — not a batch divided by its row count, which is the usual way a latency claim turns out to be false in production. 400 events timed.
 
-| | p50 | p95 | p99 | max |
-|---|---|---|---|---|
-| end to end | 117.1 ms | 152.6 ms | **171.4 ms** | 185.5 ms |
+### The firewall is two paths, not one deadline
 
-Against a **50 ms** authorisation-host budget, that is **over** budget.
+Not every layer has to answer inside the authorisation window, and pretending they do is what makes the budget look unmeetable.
+
+**Inline — L0 + L1.** What must return before the issuer answers the acquirer, because it is what changes the *authorisation decision*: the deterministic protocol clauses, and the supervised score they escalate to. Both need only the event and backward-looking state.
+
+**Fast-follow — L2, L3, L4, fusion and policy.** What informs an action taken **after** the authorisation has been answered. On the agentic rail the two actions that matter are both post-authorisation in any real deployment:
+
+- **Mandate revocation** — a mandate used to read a poisoned page is revoked so the *next* authorisation under it fails L0. That is a credential-lifecycle operation against the mandate registry, not a field in the authorisation response.
+- **Agent quarantine** — an agent whose identity component has fused with a ring is suspended, which changes every future authorisation it attempts and none of the one in flight.
+
+Holding an authorisation open while a classifier reads eleven web pages, in order to take an action that cannot be applied to that authorisation anyway, would be an architectural error rather than a performance one. The graph pass is counted **inline** despite L4 being a fast-follow layer, because L1 consumes its 28 `gph_` features: it is inline as a feature source.
+
+| path | p50 | p95 | p99 | vs the 50 ms budget |
+|---|---|---|---|---|
+| **inline** — L0+L1, pre-authorisation | 61.2 ms | 64.9 ms | **66.3 ms** | **over** |
+| **fast-follow** — L2+L3+fusion, post-authorisation | 53.5 ms | 58.1 ms | 62.1 ms | not governed by it |
+| **full stack** | 115.7 ms | 121.1 ms | **125.0 ms** | **over** |
+
+The split is asserted to partition the stage list rather than computed by subtraction — an earlier run let L2, which is 40% of the clock, vanish into fast-follow without being named there.
+
+**The inline path misses the budget by 1.3x, and ~0.41 ms of it is real work.** Those same inline stages cost **0.41 ms per row** when called with many rows instead of one — so of the 66 ms measured at p99, something like 99% is per-call framework overhead that a production scoring path would not pay. That does not make the budget met; it makes the miss an implementation property rather than an architectural one, and the next section measures exactly where it goes.
+
+### Every stage
 
 | stage | mean | p99 | share | per row in batch | overhead |
 |---|---|---|---|---|---|
-| `velocity` | 0.138 ms | 0.660 ms | 0.1% | 0.1383 ms | — |
-| `graph` | 0.126 ms | 0.357 ms | 0.1% | 0.1257 ms | — |
-| `transaction` | 7.353 ms | 11.034 ms | 6.1% | 0.0244 ms | 301x |
-| `entity` | 47.031 ms | 63.058 ms | 39.1% | 0.1290 ms | 364x |
-| `mandate` | 5.111 ms | 9.077 ms | 4.2% | 0.0192 ms | 266x |
-| `L0` | 0.859 ms | 1.802 ms | 0.7% | 0.0042 ms | 206x |
-| `L1` | 3.344 ms | 5.979 ms | 2.8% | 0.0156 ms | 214x |
-| `L2` | 45.150 ms | 66.103 ms | 37.5% | 0.1877 ms | 241x |
-| `L3` | 0.048 ms | 0.102 ms | 0.0% | 0.0018 ms | 27x |
-| `fusion+policy` | 11.221 ms | 14.898 ms | 9.3% | 0.0365 ms | 307x |
+| `velocity` | 0.132 ms | 0.654 ms | 0.1% | 0.1319 ms | — |
+| `graph` | 0.116 ms | 0.381 ms | 0.1% | 0.1163 ms | — |
+| `transaction` | 6.971 ms | 8.553 ms | 6.0% | 0.0192 ms | 364x |
+| `entity` | 45.909 ms | 49.781 ms | 39.7% | 0.1128 ms | 407x |
+| `mandate` | 4.745 ms | 5.239 ms | 4.1% | 0.0134 ms | 355x |
+| `L0` | 0.779 ms | 0.951 ms | 0.7% | 0.0028 ms | 275x |
+| `L1` | 3.086 ms | 3.448 ms | 2.7% | 0.0183 ms | 169x |
+| `L2` | 43.174 ms | 50.464 ms | 37.3% | 0.1481 ms | 292x |
+| `L3` | 0.041 ms | 0.084 ms | 0.0% | 0.0014 ms | 30x |
+| `fusion+policy` | 10.801 ms | 11.708 ms | 9.3% | 0.0285 ms | 380x |
 
 ### Read the last two columns before the p99
 
-Most of the clock goes to `entity`, which costs 47.0 ms called with one row and 0.1290 ms per row called with many — a factor of **364**. That is per-call overhead in pandas and scikit-learn, not model work: `Series.map(dict)` materialises the lookup table into an index on every call, so a feature block pays that cost once per feature to look up one value.
+Most of the clock goes to `entity`, which costs 45.9 ms called with one row and 0.1128 ms per row called with many — a factor of **407**. That is per-call overhead in pandas and scikit-learn, not model work: `Series.map(dict)` materialises the lookup table into an index on every call, so a feature block pays that cost once per feature to look up one value.
 
 **The fix is named and not applied.** A plain dictionary lookup on the single-event path removes it, and the feature builder is shared with the offline pass behind every pinned number in this document. Three days out, this project records the finding rather than re-rolls the tables for it.
 
-The two stages that genuinely **cannot** be batched — the stateful stores, which must read state before folding the event in, and which are therefore the same code online and offline — cost `velocity` 0.660 ms p99 and `graph` 0.357 ms p99, **1.02 ms together**. Those are the numbers that would survive a rewritten scoring path, and they are the ones the architecture was designed around: one forward pass, `bisect` and prefix sums per window, union-find over the identity graph, bounded memory by eviction.
+The two stages that genuinely **cannot** be batched — the stateful stores, which must read state before folding the event in, and which are therefore the same code online and offline — cost `velocity` 0.654 ms p99 and `graph` 0.381 ms p99, **1.04 ms together**. Those are the numbers that would survive a rewritten scoring path, and they are the ones the architecture was designed around: one forward pass, `bisect` and prefix sums per window, union-find over the identity graph, bounded memory by eviction.
 
-The honest headline is therefore both sentences: **the current implementation misses a 50 ms budget at p99 (171 ms), and the miss is in the calling convention rather than in the models.** Quoting only the second would be an estimate dressed as a measurement; quoting only the first would invite the conclusion that a five-layer firewall cannot run inline, which this measurement does not support.
+The honest headline is therefore both sentences: **the current implementation misses a 50 ms budget at p99 (125 ms full stack, 66 ms inline), and the miss is in the calling convention rather than in the models.** Quoting only the second would be an estimate dressed as a measurement; quoting only the first would invite the conclusion that a five-layer firewall cannot run inline, which this measurement does not support.
+
+One measurement-hygiene note, because it changed a number by a factor of two: an earlier run of this bench was taken while the fidelity scorecard was fitting on the same machine, and every percentile roughly doubled. Latency is the one measurement in this repository that is not reproducible from a seed — it is a property of the machine at the moment it ran — so it is measured with nothing else running, and that is worth stating rather than assuming.
 
 ## Two things a deployment would need to know
 

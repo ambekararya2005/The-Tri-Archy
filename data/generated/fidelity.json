@@ -1,5 +1,5 @@
 {
-  "generated": "2026-08-25T13:03:39+00:00",
+  "generated": "2026-08-25T14:06:32+00:00",
   "schema_version": "1.1.0",
   "seed": 1337,
   "calibration": {
@@ -352,43 +352,66 @@
       {
         "feature": "merchant_rank_pct",
         "alone_auc": 0.8288395087553857,
-        "gain_share": 0.792567247320514
-      },
-      {
-        "feature": "hour",
-        "alone_auc": 0.564323924962165,
-        "gain_share": 0.0733598641547811
-      },
-      {
-        "feature": "gap_ratio_log",
-        "alone_auc": 0.5302095818855767,
-        "gain_share": 0.03237092327868958
-      },
-      {
-        "feature": "burst_1h",
-        "alone_auc": 0.521091796129064,
-        "gain_share": 0.017272461593754045
+        "gain_share": 0.792567247320514,
+        "mean_abs_contribution": 5.378968926418897,
+        "contribution_share": 0.7072269046322152
       },
       {
         "feature": "amount_vs_customer",
         "alone_auc": 0.516961595564169,
-        "gain_share": 0.05351600130509033
+        "gain_share": 0.05351600130509033,
+        "mean_abs_contribution": 0.5310409427237206,
+        "contribution_share": 0.06982127007852182
       },
       {
-        "feature": "category_shift",
-        "alone_auc": 0.507527504342791,
-        "gain_share": 0.0009696139454544843
+        "feature": "hour",
+        "alone_auc": 0.564323924962165,
+        "gain_share": 0.0733598641547811,
+        "mean_abs_contribution": 0.4590518269574099,
+        "contribution_share": 0.060356140198228256
       },
       {
-        "feature": "dow",
-        "alone_auc": 0.5056084658001724,
-        "gain_share": 0.0029229237213115066
+        "feature": "gap_ratio_log",
+        "alone_auc": 0.5302095818855767,
+        "gain_share": 0.03237092327868958,
+        "mean_abs_contribution": 0.4256433215946454,
+        "contribution_share": 0.05596358947720617
+      },
+      {
+        "feature": "burst_1h",
+        "alone_auc": 0.521091796129064,
+        "gain_share": 0.017272461593754045,
+        "mean_abs_contribution": 0.3564573952962078,
+        "contribution_share": 0.04686702298472555
       },
       {
         "feature": "log_amount_z",
         "alone_auc": 0.500241320679785,
-        "gain_share": 0.027020964680404953
+        "gain_share": 0.027020964680404953,
+        "mean_abs_contribution": 0.25723973590959665,
+        "contribution_share": 0.033821883833947367
+      },
+      {
+        "feature": "dow",
+        "alone_auc": 0.5056084658001724,
+        "gain_share": 0.0029229237213115066,
+        "mean_abs_contribution": 0.15617473546774738,
+        "contribution_share": 0.020533856257121726
+      },
+      {
+        "feature": "category_shift",
+        "alone_auc": 0.507527504342791,
+        "gain_share": 0.0009696139454544843,
+        "mean_abs_contribution": 0.0411418618892664,
+        "contribution_share": 0.005409332538034078
       }
+    ],
+    "top_features": [
+      "merchant_rank_pct",
+      "amount_vs_customer",
+      "hour",
+      "gap_ratio_log",
+      "burst_1h"
     ],
     "reading": "Separable at 100%. On these features the synthetic population is not passing for the reference panel, and the scorecard says so."
   },
@@ -414,39 +437,220 @@
       {
         "feature": "gap_ratio_log",
         "alone_auc": 0.5302095818855767,
-        "gain_share": 0.26916890953595063
-      },
-      {
-        "feature": "burst_1h",
-        "alone_auc": 0.521091796129064,
-        "gain_share": 0.1132467215226195
+        "gain_share": 0.26916890953595063,
+        "mean_abs_contribution": 0.7064498895784723,
+        "contribution_share": 0.2548898058889777
       },
       {
         "feature": "amount_vs_customer",
         "alone_auc": 0.516961595564169,
-        "gain_share": 0.27854730827825724
+        "gain_share": 0.27854730827825724,
+        "mean_abs_contribution": 0.6836939723261747,
+        "contribution_share": 0.24667938443258153
       },
       {
-        "feature": "category_shift",
-        "alone_auc": 0.507527504342791,
-        "gain_share": 0.014383815221186525
-      },
-      {
-        "feature": "dow",
-        "alone_auc": 0.5056084658001724,
-        "gain_share": 0.04124760659294593
+        "feature": "burst_1h",
+        "alone_auc": 0.521091796129064,
+        "gain_share": 0.1132467215226195,
+        "mean_abs_contribution": 0.6317035524227493,
+        "contribution_share": 0.2279210432780834
       },
       {
         "feature": "log_amount_z",
         "alone_auc": 0.500241320679785,
-        "gain_share": 0.2834056388490402
+        "gain_share": 0.2834056388490402,
+        "mean_abs_contribution": 0.4592899391262022,
+        "contribution_share": 0.16571355613133568
+      },
+      {
+        "feature": "dow",
+        "alone_auc": 0.5056084658001724,
+        "gain_share": 0.04124760659294593,
+        "mean_abs_contribution": 0.22860191386959966,
+        "contribution_share": 0.08248043960604035
+      },
+      {
+        "feature": "category_shift",
+        "alone_auc": 0.507527504342791,
+        "gain_share": 0.014383815221186525,
+        "mean_abs_contribution": 0.061850153895870195,
+        "contribution_share": 0.022315770662981443
       }
+    ],
+    "top_features": [
+      "gap_ratio_log",
+      "amount_vs_customer",
+      "burst_1h",
+      "log_amount_z",
+      "dow"
     ],
     "reading": "Clearly separable (68%). The two panels differ in ways a model finds easily, and the top feature below is where to look first."
   },
+  "discriminator_naive": {
+    "auc": 0.9998647315755717,
+    "columns": [
+      "amount",
+      "hour",
+      "category_code",
+      "customer_code",
+      "merchant_code"
+    ],
+    "alone_auc": {
+      "amount": 0.9653503180152334,
+      "hour": 0.564323924962165,
+      "category_code": 0.5954109247896184,
+      "customer_code": 0.872111898480486,
+      "merchant_code": 0.7213177879772013
+    },
+    "note": "Raw columns, two currencies, two taxonomies, two identifier namespaces. An AUC near 1.0 is expected and is not a statement about the population."
+  },
+  "discriminator_ablation_path": [
+    {
+      "dropped_so_far": [],
+      "n_features": 8,
+      "auc": 0.9994365213021347,
+      "separability": 0.9988730426042693,
+      "next_to_drop": "merchant_rank_pct"
+    },
+    {
+      "dropped_so_far": [
+        "merchant_rank_pct"
+      ],
+      "n_features": 7,
+      "auc": 0.8833035303936522,
+      "separability": 0.7666070607873043,
+      "next_to_drop": "gap_ratio_log"
+    },
+    {
+      "dropped_so_far": [
+        "merchant_rank_pct",
+        "gap_ratio_log"
+      ],
+      "n_features": 6,
+      "auc": 0.84161208126148,
+      "separability": 0.68322416252296,
+      "next_to_drop": "amount_vs_customer"
+    },
+    {
+      "dropped_so_far": [
+        "merchant_rank_pct",
+        "gap_ratio_log",
+        "amount_vs_customer"
+      ],
+      "n_features": 5,
+      "auc": 0.7076296809151938,
+      "separability": 0.4152593618303877,
+      "next_to_drop": "hour"
+    },
+    {
+      "dropped_so_far": [
+        "merchant_rank_pct",
+        "gap_ratio_log",
+        "amount_vs_customer",
+        "hour"
+      ],
+      "n_features": 4,
+      "auc": 0.6172312952644757,
+      "separability": 0.23446259052895146,
+      "next_to_drop": "dow"
+    },
+    {
+      "dropped_so_far": [
+        "merchant_rank_pct",
+        "gap_ratio_log",
+        "amount_vs_customer",
+        "hour",
+        "dow"
+      ],
+      "n_features": 3,
+      "auc": 0.588284309110201,
+      "separability": 0.17656861822040204,
+      "next_to_drop": "log_amount_z"
+    },
+    {
+      "dropped_so_far": [
+        "merchant_rank_pct",
+        "gap_ratio_log",
+        "amount_vs_customer",
+        "hour",
+        "dow",
+        "log_amount_z"
+      ],
+      "n_features": 2,
+      "auc": 0.5231089667266817,
+      "separability": 0.04621793345336345,
+      "next_to_drop": null
+    }
+  ],
+  "feature_class": [
+    {
+      "feature": "merchant_rank_pct",
+      "verdict": "structural",
+      "reason": "Which merchants carry the volume. Ours is Zipf (top 10% take 66%), the reference is near-uniform (14.6%). A property of the generative model, not of formatting -- and separately adjudicated to the reference, because real acceptance estates are heavy-tailed.",
+      "alone_auc": 0.8288395087553857,
+      "contribution_share": 0.7072269046322152
+    },
+    {
+      "feature": "amount_vs_customer",
+      "verdict": "structural",
+      "reason": "How a ticket sits against the cardholder's own history -- a joint property of the amount draw and the customer assignment, and the single most transferable fraud signal there is.",
+      "alone_auc": 0.516961595564169,
+      "contribution_share": 0.06982127007852182
+    },
+    {
+      "feature": "hour",
+      "verdict": "cosmetic",
+      "reason": "Timestamp granularity at the coarsest scale: which hour a transaction is stamped with. The reference has no diurnal curve at all, ours does. Nothing about behaviour changes if the curve is reshaped -- it is when the generator chose to place events, and it is adjudicated to the reference for having no curve to compare against.",
+      "alone_auc": 0.564323924962165,
+      "contribution_share": 0.060356140198228256
+    },
+    {
+      "feature": "gap_ratio_log",
+      "verdict": "structural",
+      "reason": "How a cardholder's transactions cluster in time relative to their own rhythm. Burstiness is a behavioural property and the arrival process that produces it is part of the generative model.",
+      "alone_auc": 0.5302095818855767,
+      "contribution_share": 0.05596358947720617
+    },
+    {
+      "feature": "burst_1h",
+      "verdict": "structural",
+      "reason": "The same arrival process read as a probability. 12.4% of our events follow another within the hour against 16.6% of the reference's.",
+      "alone_auc": 0.521091796129064,
+      "contribution_share": 0.04686702298472555
+    },
+    {
+      "feature": "log_amount_z",
+      "verdict": "cosmetic",
+      "reason": "Within-category amount dispersion, and the residual separation here is **rounding**: the population snaps amounts to round numbers, and F6-40's injector snaps harder than a real ring would. The Day 5 derived probe already flagged txn_round_score at 0.966 as an artefact for exactly this reason. Softening the snap is a recorded outstanding item.",
+      "alone_auc": 0.500241320679785,
+      "contribution_share": 0.033821883833947367
+    },
+    {
+      "feature": "dow",
+      "verdict": "cosmetic",
+      "reason": "Day-of-week placement. Same class as `hour`: calendar rendering, not behaviour.",
+      "alone_auc": 0.5056084658001724,
+      "contribution_share": 0.020533856257121726
+    },
+    {
+      "feature": "category_shift",
+      "verdict": "structural",
+      "reason": "Whether consecutive transactions change category -- basket volatility, a joint property of the category draw and the per-customer sequence. The distance is 0.0005 JSD, so it is structural and negligible.",
+      "alone_auc": 0.507527504342791,
+      "contribution_share": 0.005409332538034078
+    }
+  ],
   "headline": {
     "discriminator_auc": 0.9994129224245365,
     "discriminator_auc_ablated": 0.8398542753120788,
+    "discriminator_auc_naive": 0.9998647315755717,
+    "discriminator_top_features": [
+      "merchant_rank_pct",
+      "amount_vs_customer",
+      "hour",
+      "gap_ratio_log",
+      "burst_1h"
+    ],
     "discriminator_target": 0.5,
     "transfer_ratio": 0.029815745173913073,
     "tstr_auc_pr": 0.0249048737695537,

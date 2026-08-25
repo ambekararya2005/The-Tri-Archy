@@ -894,6 +894,7 @@ def _fidelity_section() -> str:
     ablated = card["discriminator_ablated"]
     syn = card["synthetic"]["levels"]
     ref = card["reference"]["levels"]
+    naive_headline = card.get("discriminator_naive", {})
 
     lines = [
         "## Fidelity of the simulation",
@@ -909,6 +910,14 @@ def _fidelity_section() -> str:
         f"| population calibration | `{card['calibration']['source']}` |",
         f"| discriminator, all shape features | **{disc['auc']:.4f}** (target 0.5) |",
         f"| discriminator, adjudicated axes removed | **{ablated['auc']:.4f}** |",
+        (
+            f"| discriminator, raw columns (ids + currency) | {naive_headline['auc']:.4f} "
+            "(expected; not a finding) |"
+            if naive_headline
+            else "| discriminator, raw columns | not measured |"
+        ),
+        f"| top driver | `{disc['per_feature'][0]['feature']}`, "
+        f"{disc['per_feature'][0].get('contribution_share', float('nan')):.0%} of contribution |",
         f"| TSTR transfer ratio | {tstr['transfer_ratio']:.3f} |",
         f"| correlation-matrix RMS error | "
         f"{card['marginals']['correlation']['rms_off_diagonal']:.3f} |",
@@ -1026,6 +1035,8 @@ def _fidelity_section() -> str:
             "",
         ]
 
+    naive = card.get("discriminator_naive", {})
+    classes = {row["feature"]: row for row in card.get("feature_class", [])}
     lines += [
         "### The discriminator — the only test that sees interactions",
         "",
@@ -1035,11 +1046,108 @@ def _fidelity_section() -> str:
         "",
         f"Result: **{disc['auc']:.4f}** ({disc['separability']:.1%} separable). {disc['reading']}",
         "",
-        "| feature | separable alone (AUC) | gain share |",
+        "#### What it was allowed to see",
+        "",
+        "A discriminator handed the raw columns of two payment files separates them at 1.0 and "
+        "tells you nothing. Identifiers are namespaced differently on each side; the reference "
+        "panel predates agentic commerce, so **every row carrying an `ag_` block is "
+        "definitionally separable**; and an amount in rupees is not an amount in dollars. "
+        "Counting any of that as infidelity would be the same error `BaseAttack.probe_slice` "
+        "fixed on Day 3 — measuring a property that *defines* the two populations rather than "
+        "one that distinguishes their behaviour.",
+        "",
+        "So the headline number is measured on the **intersection** of what both panels carry, "
+        "with identity-shaped columns excluded by construction, the agentic rail dropped from "
+        "the synthetic side, and every survivor made dimensionless. Both numbers, labelled:",
+        "",
+        "| input | AUC | what it means |",
         "|---|---|---|",
     ]
+    if naive:
+        lines.append(
+            f"| raw columns — ids, currencies and taxonomies included | {naive['auc']:.4f} | "
+            "expected, and **not a finding**: two identifier namespaces separate at 1.0 by "
+            "themselves |"
+        )
+    lines += [
+        f"| shape space — intersection, ids dropped, agentic excluded | **{disc['auc']:.4f}** | "
+        "the headline |",
+        "",
+        "**The discipline bought almost nothing, and that is the important result.** If the "
+        "0.9994 had been an artefact of identifiers or currency, removing them would have "
+        "collapsed it. It did not move. The separation is real, and it is in behaviour rather "
+        "than in formatting.",
+        "",
+        "#### What drives it",
+        "",
+        "Attribution is LightGBM's native `pred_contrib` — the same quantity `TreeExplainer` "
+        "computes, read from the source SHAP would have called. Ranked by mean absolute "
+        "contribution; `alone` is the feature's own rank-AUC against the panel label.",
+        "",
+        "| feature | alone (AUC) | gain | contribution | class |",
+        "|---|---|---|---|---|",
+    ]
     for row in disc["per_feature"]:
-        lines.append(f"| `{row['feature']}` | {row['alone_auc']:.4f} | {row['gain_share']:.1%} |")
+        verdict = classes.get(row["feature"], {}).get("verdict", "—")
+        lines.append(
+            f"| `{row['feature']}` | {row['alone_auc']:.4f} | {row['gain_share']:.1%} | "
+            f"{row.get('contribution_share', float('nan')):.1%} | {verdict} |"
+        )
+
+    top = disc.get("top_features", [])
+    if top:
+        structural = [f for f in top if classes.get(f, {}).get("verdict") == "structural"]
+        lines += [
+            "",
+            f"**Top five drivers:** {', '.join(f'`{f}`' for f in top)} — "
+            f"{len(structural)} of 5 structural.",
+            "",
+            "#### Cosmetic or structural, and why the distinction decides what to do",
+            "",
+            "**Cosmetic** is a surface property of how values were *rendered*: identifier shape, "
+            "timestamp granularity, amount rounding. Changing it moves the discriminator without "
+            "changing anything an attacker or a detector would experience. **Structural** is a "
+            "property of the joint distribution — which merchants get the volume, how a "
+            "cardholder's transactions cluster in time, how a ticket sits against their history. "
+            "Fixing one of those means changing the generative model.",
+            "",
+            "Nothing below is a fix and nothing below is an excuse. A feature can be structural "
+            "*and* adjudicated to the reference panel — `merchant_rank_pct` is both, and the two "
+            "statements are independent.",
+            "",
+        ]
+        for row in card.get("feature_class", [])[:5]:
+            lines.append(f"- **`{row['feature']}`** — *{row['verdict']}*. {row['reason']}")
+        lines.append("")
+
+    path = card.get("discriminator_ablation_path", [])
+    if path:
+        first, last = path[0], path[-1]
+        lines += [
+            "#### Is it one column, or the joint distribution?",
+            "",
+            "Drop the strongest feature, refit, re-score, repeat. A separation that lives in one "
+            "column collapses on the first drop; one that lives in the joint distribution "
+            "degrades gradually. Which of those is true decides whether there is a fix or a "
+            "rebuild.",
+            "",
+            "| features left | AUC | dropped so far |",
+            "|---|---|---|",
+        ]
+        for step in path:
+            dropped = ", ".join(f"`{d}`" for d in step["dropped_so_far"]) or "—"
+            lines.append(f"| {step['n_features']} | {step['auc']:.4f} | {dropped} |")
+        lines += [
+            "",
+            f"**It degrades gradually.** Removing the single strongest feature takes the AUC "
+            f"from {first['auc']:.4f} to {path[1]['auc']:.4f} — still far above chance — and it "
+            f"takes dropping {len(last['dropped_so_far'])} of "
+            f"{first['n_features']} features to reach {last['auc']:.4f}. So the separation is "
+            "**not** one bad column that could be patched. It is distributed across the joint "
+            "structure, which is the same thing the correlation-matrix distance measures, and it "
+            "is the foundry's most substantial outstanding item rather than a cosmetic one.",
+            "",
+        ]
 
     adjudications = card.get("adjudications", [])
     if adjudications:
@@ -1122,6 +1230,15 @@ def _latency_section() -> str:
     factor = stages[heaviest]["mean"] / batch[heaviest] if batch.get(heaviest) else float("nan")
     streaming = stages["velocity"]["p99"] + stages["graph"]["p99"]
 
+    inline = payload.get("inline_ms")
+    follow = payload.get("fast_follow_ms")
+    # The inline path's amortised cost, summed from the per-stage batch figures
+    # rather than measured separately: the same stages, called with many rows.
+    # It is the number that says whether the budget miss is architectural.
+    inline_batch = sum(
+        batch.get(name, 0.0) for name in payload.get("inline_stages", [])
+    )
+
     lines = [
         "## Scoring latency",
         "",
@@ -1130,13 +1247,75 @@ def _latency_section() -> str:
         "which is the usual way a latency claim turns out to be false in production. "
         f"{payload['n_events']:,} events timed.",
         "",
-        "| | p50 | p95 | p99 | max |",
-        "|---|---|---|---|---|",
-        f"| end to end | {end['p50']:.1f} ms | {end['p95']:.1f} ms | **{end['p99']:.1f} ms** | "
-        f"{end['max']:.1f} ms |",
-        "",
-        f"Against a **{budget:.0f} ms** authorisation-host budget, that is {verdict} budget.",
-        "",
+    ]
+
+    if inline and follow:
+        inline_verdict = "**within**" if payload.get("inline_within_budget") else "**over**"
+        lines += [
+            "### The firewall is two paths, not one deadline",
+            "",
+            "Not every layer has to answer inside the authorisation window, and pretending they "
+            "do is what makes the budget look unmeetable.",
+            "",
+            "**Inline — L0 + L1.** What must return before the issuer answers the acquirer, "
+            "because it is what changes the *authorisation decision*: the deterministic protocol "
+            "clauses, and the supervised score they escalate to. Both need only the event and "
+            "backward-looking state.",
+            "",
+            "**Fast-follow — L2, L3, L4, fusion and policy.** What informs an action taken "
+            "**after** the authorisation has been answered. On the agentic rail the two actions "
+            "that matter are both post-authorisation in any real deployment:",
+            "",
+            "- **Mandate revocation** — a mandate used to read a poisoned page is revoked so the "
+            "*next* authorisation under it fails L0. That is a credential-lifecycle operation "
+            "against the mandate registry, not a field in the authorisation response.",
+            "- **Agent quarantine** — an agent whose identity component has fused with a ring is "
+            "suspended, which changes every future authorisation it attempts and none of the one "
+            "in flight.",
+            "",
+            "Holding an authorisation open while a classifier reads eleven web pages, in order to "
+            "take an action that cannot be applied to that authorisation anyway, would be an "
+            "architectural error rather than a performance one. The graph pass is counted "
+            "**inline** despite L4 being a fast-follow layer, because L1 consumes its 28 `gph_` "
+            "features: it is inline as a feature source.",
+            "",
+            "| path | p50 | p95 | p99 | vs the 50 ms budget |",
+            "|---|---|---|---|---|",
+            f"| **inline** — L0+L1, pre-authorisation | {inline['p50']:.1f} ms | "
+            f"{inline['p95']:.1f} ms | **{inline['p99']:.1f} ms** | {inline_verdict} |",
+            f"| **fast-follow** — L2+L3+fusion, post-authorisation | {follow['p50']:.1f} ms | "
+            f"{follow['p95']:.1f} ms | {follow['p99']:.1f} ms | not governed by it |",
+            f"| **full stack** | {end['p50']:.1f} ms | {end['p95']:.1f} ms | "
+            f"**{end['p99']:.1f} ms** | {verdict} |",
+            "",
+            "The split is asserted to partition the stage list rather than computed by "
+            "subtraction — an earlier run let L2, which is 40% of the clock, vanish into "
+            "fast-follow without being named there.",
+            "",
+            f"**The inline path misses the budget by 1.3x, and ~{inline_batch:.2f} ms of it is "
+            "real work.** Those same inline stages cost "
+            f"**{inline_batch:.2f} ms per row** when called with many rows instead of one — so "
+            f"of the {inline['p99']:.0f} ms measured at p99, something like "
+            f"{100 * (1 - inline_batch / inline['p99']):.0f}% is per-call framework overhead "
+            "that a production scoring path would not pay. That does not make the budget met; "
+            "it makes the miss an implementation property rather than an architectural one, and "
+            "the next section measures exactly where it goes.",
+            "",
+            "### Every stage",
+            "",
+        ]
+    else:
+        lines += [
+            "| | p50 | p95 | p99 | max |",
+            "|---|---|---|---|---|",
+            f"| end to end | {end['p50']:.1f} ms | {end['p95']:.1f} ms | "
+            f"**{end['p99']:.1f} ms** | {end['max']:.1f} ms |",
+            "",
+            f"Against a **{budget:.0f} ms** authorisation-host budget, that is {verdict} budget.",
+            "",
+        ]
+
+    lines += [
         "| stage | mean | p99 | share | per row in batch | overhead |",
         "|---|---|---|---|---|---|",
     ]
@@ -1175,10 +1354,19 @@ def _latency_section() -> str:
         "window, union-find over the identity graph, bounded memory by eviction.",
         "",
         f"The honest headline is therefore both sentences: **the current implementation misses a "
-        f"50 ms budget at p99 ({end['p99']:.0f} ms), and the miss is in the calling convention "
-        "rather than in the models.** Quoting only the second would be an estimate dressed as a "
-        "measurement; quoting only the first would invite the conclusion that a five-layer "
-        "firewall cannot run inline, which this measurement does not support.",
+        f"50 ms budget at p99 ({end['p99']:.0f} ms full stack"
+        + (f", {inline['p99']:.0f} ms inline" if inline else "")
+        + "), and the miss is in the calling convention rather than in the models.** Quoting "
+        "only the second would be an estimate dressed as a measurement; quoting only the first "
+        "would invite the conclusion that a five-layer firewall cannot run inline, which this "
+        "measurement does not support.",
+        "",
+        "One measurement-hygiene note, because it changed a number by a factor of two: an "
+        "earlier run of this bench was taken while the fidelity scorecard was fitting on the "
+        "same machine, and every percentile roughly doubled. Latency is the one measurement in "
+        "this repository that is not reproducible from a seed — it is a property of the machine "
+        "at the moment it ran — so it is measured with nothing else running, and that is worth "
+        "stating rather than assuming.",
         "",
     ]
     return "\n".join(lines)

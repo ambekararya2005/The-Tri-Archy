@@ -174,11 +174,48 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(f"  {d['n_per_side']:,} rows per side, {d['folds']}-fold")
     print(f"  {d['reading']}")
+    naive = card["discriminator_naive"]
     print()
-    print(f"  {'feature':<26} {'alone (AUC)':>12} {'gain share':>12}")
-    print(f"  {'-' * 26} {'-' * 12} {'-' * 12}")
+    print("  what it was allowed to see, as a measured difference:")
+    print(
+        f"    raw columns, ids and currency included   {naive['auc']:.4f}   "
+        "(expected ~1.0; not a finding)"
+    )
+    print(
+        f"    shape space: intersection, ids dropped,  {d['auc']:.4f}   "
+        "<- the headline"
+    )
+    print("    agentic rail excluded")
+    print(f"    {naive['note']}")
+
+    print()
+    print("  attribution (LightGBM pred_contrib, the same quantity TreeExplainer computes):")
+    print(
+        f"  {'feature':<22} {'alone (AUC)':>11} {'gain':>8} {'contrib':>9}  class"
+    )
+    print(f"  {'-' * 22} {'-' * 11} {'-' * 8} {'-' * 9}  {'-' * 10}")
+    verdicts = {row["feature"]: row for row in card["feature_class"]}
     for row in d["per_feature"]:
-        print(f"  {row['feature']:<26} {row['alone_auc']:>12.4f} {row['gain_share']:>12.1%}")
+        verdict = verdicts.get(row["feature"], {}).get("verdict", "?")
+        print(
+            f"  {row['feature']:<22} {row['alone_auc']:>11.4f} {row['gain_share']:>8.1%} "
+            f"{row.get('contribution_share', float('nan')):>9.1%}  {verdict}"
+        )
+    print()
+    print(f"  top 5 drivers: {', '.join(d['top_features'])}")
+
+    print()
+    print("  cosmetic or structural, and why:")
+    for row in card["feature_class"][:5]:
+        print(f"    {row['feature']}  [{row['verdict']}]")
+        print(f"      {row['reason']}")
+
+    print()
+    print("  ablation path - drop the strongest, refit, repeat:")
+    print(f"    {'features':>9}  {'AUC':>7}   dropped so far")
+    for step in card["discriminator_ablation_path"]:
+        dropped = ", ".join(step["dropped_so_far"]) or "-"
+        print(f"    {step['n_features']:>9}  {step['auc']:>7.4f}   {dropped}")
 
     _rule("4b. Which side is anomalous? - adjudicated, with the measurement that decided it")
     print(adjudicate.format_adjudications(card["adjudications"]))
