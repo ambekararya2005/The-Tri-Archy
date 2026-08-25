@@ -24,8 +24,11 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   type AuthFrame,
   type Decision,
+  type Mode,
   type StreamDone,
+  type StreamHandle,
   type StreamMeta,
+  onModeChange,
   openStream,
   startRun,
 } from "./api";
@@ -245,7 +248,10 @@ export default function Console() {
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [rate, setRate] = useState(6);
-  const sourceRef = useRef<EventSource | null>(null);
+  const [mode, setMode] = useState<Mode>("unknown");
+  const sourceRef = useRef<StreamHandle | null>(null);
+
+  useEffect(() => onModeChange(setMode), []);
 
   const stop = useCallback(() => {
     sourceRef.current?.close();
@@ -266,25 +272,30 @@ export default function Console() {
     try {
       // A fresh offset each run so a second demo does not replay the same first
       // ten authorisations at the same person.
-      const run = await startRun({ n_events: 240, rate, offset: Math.floor(Math.random() * 300) });
+      const offset = Math.floor(Math.random() * 300);
+      const run = await startRun({ n_events: 240, rate, offset });
       setRunning(true);
-      sourceRef.current = openStream(run.run_id, {
-        onMeta: setMeta,
-        onAuth: (frame) => {
-          // Newest first, capped. An unbounded list is a demo that gets slower
-          // the longer a judge watches it.
-          setFrames((prior) => [frame, ...prior].slice(0, 120));
-          if (frame.event.decision === "decline") setSelected(frame);
+      sourceRef.current = openStream(
+        run,
+        {
+          onMeta: setMeta,
+          onAuth: (frame) => {
+            // Newest first, capped. An unbounded list is a demo that gets slower
+            // the longer a judge watches it.
+            setFrames((prior) => [frame, ...prior].slice(0, 120));
+            if (frame.event.decision === "decline") setSelected(frame);
+          },
+          onDone: (d) => {
+            setDone(d);
+            setRunning(false);
+          },
+          onError: (message) => {
+            setError(message);
+            setRunning(false);
+          },
         },
-        onDone: (d) => {
-          setDone(d);
-          setRunning(false);
-        },
-        onError: () => {
-          setError("stream interrupted — is the API still running?");
-          setRunning(false);
-        },
-      });
+        { offset },
+      );
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -327,6 +338,12 @@ export default function Console() {
             />
             <span className="num">{rate}/s</span>
           </label>
+          {mode === "static" && (
+            <span className="rail" title="No API answered; replaying the committed feed on a timer.">
+              offline replay
+            </span>
+          )}
+          {mode === "live" && <span className="rail agentic">API connected</span>}
           <span className="hint" style={{ marginLeft: "auto", maxWidth: 620, textAlign: "right" }}>
             {meta?.sampling_note ??
               "Curated replay of pre-scored authorisations. Fraud is over-sampled so something happens while you watch."}

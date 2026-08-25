@@ -1,4 +1,4 @@
-.PHONY: help install lint fmt test atlas schema population figure dataset probe corpus features l0 firewall render loop arena derived drift slices ood feed api web docx submission gate demo clean
+.PHONY: help install lint fmt test atlas schema population figure dataset probe corpus features l0 firewall render loop arena derived drift slices ood feed api static web docx submission gate demo clean
 
 PY ?= python
 
@@ -26,6 +26,7 @@ help:
 	@echo "  ood      L3 against hand-authored text it did not come from"
 	@echo "  feed     pre-score a window of authorisations for the live console"
 	@echo "  api      serve the console backend on :8000"
+	@echo "  static   freeze the API to JSON so the console needs no backend"
 	@echo "  web      build the React console (needs npm install in web/ first)"
 	@echo "  docx     generate the submission document FROM RESULTS.md"
 	@echo "  submission  ood + feed + docx + web: everything a judge is handed"
@@ -129,8 +130,15 @@ feed:
 api:
 	$(PY) -m mantis.api
 
+# Day 6: freeze every API response to JSON so the console can be hosted with no
+# backend at all. Produced by calling the real route handlers, never by a second
+# implementation of the response shapes.
+static:
+	$(PY) scripts/build_static_site.py
+
 # Day 6: the React console. `cd web && npm install` once, first.
-web:
+# Depends on `static` so the built bundle always carries a working offline mode.
+web: static
 	cd web && npm run build
 
 # Day 6: THE submission document. Every figure is read out of RESULTS.md, so
@@ -144,7 +152,10 @@ submission: ood feed docx web
 	@echo "Submission artifacts:"
 	@echo "  1. repo       this working tree"
 	@echo "  2. document   docs/MANTIS_submission.docx"
-	@echo "  3. prototype  web/dist  (serve with: make api, then npm run preview)"
+	@echo "  3. prototype  web/dist  - a SELF-CONTAINED static site."
+	@echo "                Upload that folder to any static host; it needs no"
+	@echo "                backend. Run 'make api' alongside it for the live"
+	@echo "                SSE stream instead of the offline replay."
 
 # Day 4 carry-overs: distribution drift, and the probe-slice audit.
 drift:

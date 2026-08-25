@@ -304,3 +304,61 @@ def test_loading_a_document_with_no_tables_raises() -> None:
         path.write_text("# nothing but prose\n", encoding="utf-8")
         with pytest.raises(ValueError, match="no tables"):
             results_doc.load(path)
+
+
+# ------------------------------------------------- the static (no-API) bundle --
+def test_static_bundle_matches_the_live_api(client: TestClient) -> None:
+    """The frozen files and the live routes must not drift apart.
+
+    ``web/public/data/`` is what the console reads when no backend answers. It is
+    produced by calling these same route handlers, so the two agree by
+    construction — but only until someone regenerates one and not the other. A
+    console that shows one set of numbers when deployed and another when run
+    locally is the exact failure this asserts against.
+    """
+    from mantis.core.paths import REPO_ROOT
+
+    data_dir = REPO_ROOT / "web" / "public" / "data"
+    if not data_dir.exists():
+        pytest.skip("static bundle not built; run 'make static'")
+
+    for name, path in (
+        ("health.json", "/health"),
+        ("atlas.json", "/atlas"),
+        ("arena.json", "/arena"),
+    ):
+        frozen_path = data_dir / name
+        if not frozen_path.exists():
+            continue
+        live = client.get(path)
+        if live.status_code != 200:
+            continue
+        frozen = json.loads(frozen_path.read_text(encoding="utf-8"))
+        assert frozen == live.json(), (
+            f"{name} has drifted from {path}; re-run 'make static'"
+        )
+
+
+def test_static_feed_keeps_ground_truth_out_of_the_event() -> None:
+    """The offline replay must not leak the answer either.
+
+    The live stream splits ``event`` from ``truth`` so the console cannot colour
+    a row before the score arrives. The frozen feed is read by the same
+    components down the same code path, so it has to hold the same split — and
+    it is a separate file written by a separate function, so it needs its own
+    assertion rather than inheriting the stream's.
+    """
+    from mantis.core.paths import REPO_ROOT
+
+    path = REPO_ROOT / "web" / "public" / "data" / "feed.json"
+    if not path.exists():
+        pytest.skip("static bundle not built; run 'make static'")
+
+    feed = json.loads(path.read_text(encoding="utf-8"))
+    assert feed["frames"], "the frozen feed is empty"
+    for frame in feed["frames"]:
+        assert set(frame) == {"seq", "event", "truth"}
+        for banned in ("is_fraud", "attack_id", "attack_campaign"):
+            assert banned not in frame["event"]
+    # seq must be dense from zero: the console keys React rows on it.
+    assert [f["seq"] for f in feed["frames"]] == list(range(len(feed["frames"])))
