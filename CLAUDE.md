@@ -390,9 +390,21 @@ When time runs out — and it will — sacrifice in **this order**, top first:
     `serve` extra only — **verified** that importing `mantis.api.site` loads none
     of pandas, numpy, sklearn, scipy, lightgbm, shap, matplotlib, networkx or
     pyarrow, which takes the image from ~1.5 GB to ~200 MB.
-    `scripts/deploy_hf.py` pushes it to a Hugging Face Docker Space; Spaces
-    rather than Render/Railway because a free dyno on either **sleeps after 15
-    minutes** and a judge clicking a cold URL sees a spinner.
+    `scripts/deploy_hf.py` pushes it to a Hugging Face Space; Spaces rather than
+    Render/Railway because a free dyno on either **sleeps after 15 minutes** and
+    a judge clicking a cold URL sees a spinner.
+  - **Deployed, and it is the static Space.** Hugging Face now bills Docker
+    Spaces — a free account gets `402 Payment Required` on `create_repo` — so
+    `--static` uploads `web/dist` instead. That is **not** a degraded build: the
+    bundle is self-contained by construction, because Day 6 froze every API
+    response by calling the real route handlers, and the console already replays
+    the committed feed on a timer when nothing answers `/api/health`. A CDN has
+    no cold start at all, which is a stronger version of the property the Spaces
+    decision was buying. The one thing given up is a real SSE stream, and the
+    console says which mode it is in rather than letting a viewer assume.
+    **Live: <https://aryaambekar-mantis.static.hf.space>** — note the
+    `.static.hf.space` subdomain; the plain `.hf.space` form 404s while the Space
+    itself reports RUNNING, which is exactly as confusing as it sounds.
   - **`data/reference/` had no Sparkov CSV** — Day 1 ran on the committed
     Indian-market priors, as `ReferenceStats.source` said all along. Kaggle's
     public download endpoint needs no token, so `scripts/fetch_reference.py`

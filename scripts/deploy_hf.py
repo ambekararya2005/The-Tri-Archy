@@ -1,17 +1,35 @@
 """Push MANTIS to a Hugging Face Docker Space — the third submission artifact.
 
     python scripts/deploy_hf.py --check                      # preflight only
-    python scripts/deploy_hf.py --space <user>/mantis
-    python scripts/deploy_hf.py --space <user>/mantis --token hf_xxx
+    python scripts/deploy_hf.py --space <user>/mantis --static
+    python scripts/deploy_hf.py --space <user>/mantis            # Docker, needs PRO
 
-Why Spaces, and why one container
----------------------------------
+Two modes, and the default is the one that is free
+---------------------------------------------------
+``--static`` uploads ``web/dist`` to a **static** Space. ``web/dist`` is
+self-contained by construction: Day 6 froze every API response into
+``web/public/data/`` by calling the real route handlers, and the console replays
+the committed authorisation feed on a client-side timer when nothing answers
+``/api/health``. So a static Space is not a degraded build - it is the offline
+mode the console already ships, and it has no cold start, nothing to keep awake,
+and no cost.
+
+Without ``--static`` this pushes the whole repo to a **Docker** Space, which runs
+``mantis/api/site.py``: the console at ``/`` and the live API under ``/api``, one
+process, one origin. That upgrades the stream from a client-side replay to real
+SSE. **Hugging Face now bills Docker Spaces** - a free account gets a 402 on
+``create_repo`` - so this path needs a PRO subscription. Static Spaces stay free
+for everyone.
+
+The console tells a viewer which mode it is in, in the control row, rather than
+letting anyone assume a backend exists.
+
+Why Spaces at all
+------------------
 The deadline argument is availability, not elegance. A free Render or Railway
 dyno **sleeps after ~15 minutes idle and takes ~30 s to wake**, which is exactly
-the shape of a demo that looks broken at the moment a judge clicks it. A Docker
-Space stays warm on the free tier and serves the console and the API from one
-origin, so there is no CORS preflight, no second service to keep alive, and one
-URL to hand over. See ``mantis/api/site.py`` for the composition.
+the shape of a demo that looks broken at the moment a judge clicks it. A static
+Space is a CDN: it cannot be asleep.
 
 What gets uploaded
 ------------------
@@ -97,12 +115,26 @@ REQUIRED: Final[list[str]] = [
 ]
 
 
-def preflight() -> list[str]:
+def preflight(*, static: bool) -> list[str]:
     """Return the problems that would make the deployed Space wrong. Empty is good."""
     problems: list[str] = []
     for rel in REQUIRED:
         if not (REPO_ROOT / rel).is_file():
             problems.append(f"missing: {rel}")
+
+    if static:
+        dist = REPO_ROOT / "web" / "dist"
+        if not (dist / "index.html").is_file():
+            problems.append(
+                "missing: web/dist/index.html - a static Space serves the built bundle. "
+                "Run: make web"
+            )
+        for name in ("results.json", "fidelity.json", "feed.json", "atlas_cards.json"):
+            if not (dist / "data" / name).is_file():
+                problems.append(
+                    f"missing: web/dist/data/{name} - the offline console reads it. "
+                    "Run: make web"
+                )
 
     scorecard = REPO_ROOT / "data" / "generated" / "fidelity.json"
     if not scorecard.is_file():
@@ -159,6 +191,11 @@ def main() -> int:
     parser.add_argument("--token", default=None, help="HF write token (or set $HF_TOKEN)")
     parser.add_argument("--private", action="store_true", help="create the Space private")
     parser.add_argument(
+        "--static",
+        action="store_true",
+        help="upload web/dist to a free static Space instead of a Docker Space",
+    )
+    parser.add_argument(
         "--check",
         action="store_true",
         help="run the preflight and print what would be uploaded, then stop",
@@ -168,12 +205,21 @@ def main() -> int:
     print("MANTIS -> Hugging Face Space")
     print()
 
-    problems = preflight()
+    problems = preflight(static=args.static)
     for problem in problems:
         print(f"  ! {problem}")
     if not problems:
         print("  preflight  all required artefacts present")
     print()
+
+    if args.check and args.static:
+        dist = REPO_ROOT / "web" / "dist"
+        files = [q for q in dist.rglob("*") if q.is_file()]
+        total = sum(q.stat().st_size for q in files)
+        print(f"  would upload web/dist: {len(files)} files, {total / 1e6:.1f} MB")
+        for q in sorted(files)[:12]:
+            print(f"    {q.relative_to(dist).as_posix()}")
+        return 0
 
     if args.check:
         selected = _selected_files()
@@ -200,44 +246,76 @@ def main() -> int:
     api = HfApi(token=token)
     print(f"  authenticated as {api.whoami().get('name')}")
 
-    api.create_repo(
-        repo_id=args.space,
-        repo_type="space",
-        space_sdk="docker",
-        private=args.private,
-        exist_ok=True,
-    )
-    print(f"  space ready  {args.space}")
+    sdk = "static" if args.static else "docker"
+    try:
+        api.create_repo(
+            repo_id=args.space,
+            repo_type="space",
+            space_sdk=sdk,
+            private=args.private,
+            exist_ok=True,
+        )
+    except Exception as error:  # the server message is the useful part here
+        if "402" in str(error) and not args.static:
+            print("  Hugging Face now bills Docker Spaces; a free account gets a 402 here.")
+            print("  Re-run with --static: web/dist is self-contained and a static Space")
+            print("  is free, has no cold start, and is the offline mode the console")
+            print("  already ships. You lose the live SSE stream and nothing else.")
+            return 2
+        raise
+    print(f"  space ready  {args.space}  (sdk: {sdk})")
 
     # The Space card goes first: if the folder upload triggers a build, the build
-    # already knows it is a Docker Space listening on 7860.
+    # already knows which SDK it is and, for docker, which port to expect.
+    card = "README-static.md" if args.static else "README.md"
     api.upload_file(
-        path_or_fileobj=str(REPO_ROOT / "deploy" / "hf" / "README.md"),
+        path_or_fileobj=str(REPO_ROOT / "deploy" / "hf" / card),
         path_in_repo="README.md",
         repo_id=args.space,
         repo_type="space",
-        commit_message="Space card: docker sdk, port 7860",
+        commit_message=f"Space card: {sdk} sdk",
     )
-    print("  uploaded     README.md (Space card)")
+    print(f"  uploaded     README.md (Space card, {sdk})")
 
-    api.upload_folder(
-        folder_path=str(REPO_ROOT),
-        repo_id=args.space,
-        repo_type="space",
-        allow_patterns=ALLOW,
-        ignore_patterns=IGNORE,
-        commit_message="MANTIS: console and API in one container",
-    )
-    print("  uploaded     the build context")
+    if args.static:
+        # The built bundle at the repo root, which is what a static Space serves.
+        # No source, no Python, no cache: the frozen API responses in dist/data
+        # are the whole payload.
+        api.upload_folder(
+            folder_path=str(REPO_ROOT / "web" / "dist"),
+            repo_id=args.space,
+            repo_type="space",
+            commit_message="MANTIS console, self-contained",
+        )
+        print("  uploaded     web/dist")
+    else:
+        api.upload_folder(
+            folder_path=str(REPO_ROOT),
+            repo_id=args.space,
+            repo_type="space",
+            allow_patterns=ALLOW,
+            ignore_patterns=IGNORE,
+            commit_message="MANTIS: console and API in one container",
+        )
+        print("  uploaded     the build context")
 
+    # Static Spaces are served from a *different* subdomain than the runtime
+    # SDKs, and getting this wrong hands over a URL that 404s while the Space
+    # itself reports RUNNING - which is exactly as confusing as it sounds.
     subdomain = args.space.replace("/", "-").replace("_", "-").lower()
+    host = f"{subdomain}.static.hf.space" if args.static else f"{subdomain}.hf.space"
     print()
     print(f"  Space    https://huggingface.co/spaces/{args.space}")
-    print(f"  App URL  https://{subdomain}.hf.space")
+    print(f"  App URL  https://{host}")
     print()
-    print("  The first build takes ~3-5 minutes (npm ci, then pip). Watch the")
-    print("  Logs tab. Then open the app URL ON A PHONE and press")
-    print("  'Start authorisation stream' before you believe it works.")
+    if args.static:
+        print("  A static Space goes live in seconds - no build step. Open the app URL")
+        print("  ON A PHONE and press 'Start authorisation stream'. The control row will")
+        print("  read 'offline replay', which is correct and is what this mode is.")
+    else:
+        print("  The first build takes ~3-5 minutes (npm ci, then pip). Watch the")
+        print("  Logs tab. Then open the app URL ON A PHONE and press")
+        print("  'Start authorisation stream' before you believe it works.")
     return 0
 
 

@@ -3,8 +3,7 @@ title: MANTIS
 emoji: 🦟
 colorFrom: indigo
 colorTo: red
-sdk: docker
-app_port: 7860
+sdk: static
 pinned: false
 license: mit
 short_description: Adversarial fraud foundry for agentic commerce
@@ -16,10 +15,22 @@ short_description: Adversarial fraud foundry for agentic commerce
 You cannot train a detector on data that does not exist — so MANTIS manufactures
 it, adversarially, and then builds the detector against it.
 
-This Space is the **live defence console**: the React front end and its FastAPI
-backend in one container, one origin. Press **Start authorisation stream** and
+This Space is the **defence console**. Press **Start authorisation stream** and
 watch pre-scored Mastercard Agent Pay authorisations arrive one at a time, get a
 decision from a five-layer firewall, and resolve against ground truth.
+
+It is served as a static site, and that is a design decision rather than a
+compromise. Every number this page shows was computed offline by
+`python -m mantis.defense`, `python -m mantis.loop` and
+`python -m mantis.foundry.fidelity`, then frozen to JSON **by calling the API's
+own route handlers** — so there is no second implementation of any response and
+no way for the page to disagree with the code. The authorisation stream replays a
+committed, pre-scored feed on a timer. Nothing is recomputed, nothing can be
+asleep, and there is no cold start.
+
+The same bundle runs against a live FastAPI backend when one answers `/api/health`
+— it probes once, with a two-second timeout, and the control row says which mode
+you are in rather than letting you assume.
 
 ### What you are looking at
 

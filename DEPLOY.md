@@ -5,19 +5,50 @@ prototype URL**. This file is the runbook for the third.
 
 ---
 
-## The short version
+## It is deployed
+
+**<https://aryaambekar-mantis.static.hf.space>**
+
+Verified from here: `index.html`, both bundles and all six frozen payloads return
+200, and the numbers coming off the wire are the ones in `RESULTS.md`
+(discriminator 0.9994 / 0.8399, latency p99 171.4 ms, zero-day 0.811 / 0.013 /
+0.539, 42 atlas cards, 600 feed frames). What is **not** verified from here is how
+it looks; open it on a phone.
+
+To redeploy after any change:
 
 ```bash
-hf auth login                                    # once, a write token
-python scripts/deploy_hf.py --space <you>/mantis
+make web                                                  # refreeze + rebuild
+python scripts/deploy_hf.py --space <you>/mantis --static
 ```
 
-That builds and pushes one container to a Hugging Face Docker Space: the React
-console at `/` and the whole FastAPI API under `/api`, same process, same origin.
-One URL. No CORS. Nothing cross-service to keep awake.
+Note the subdomain: a **static** Space is served from
+`<user>-<space>.static.hf.space`, not `<user>-<space>.hf.space`. The second 404s
+while the Space itself reports RUNNING, which is exactly as confusing as it
+sounds, and the deploy script now prints the right one.
 
-First build is ~3–5 minutes (npm, then pip). Then open the app URL **on a phone**
-before you believe it works.
+## The two modes, and why the free one is not a compromise
+
+`--static` uploads `web/dist` to a **static** Space. That bundle is
+self-contained by construction: Day 6 froze every API response into
+`web/public/data/` **by calling the real route handlers**, and the console
+replays the committed authorisation feed on a client-side timer when nothing
+answers `/api/health`. So a static Space is not a degraded build - it is the
+offline mode the console already shipped. No cold start, nothing to keep awake,
+no cost, and a CDN cannot be asleep when a judge clicks.
+
+What it gives up is exactly one thing: the stream is a client-side replay rather
+than real server-sent events. The console says which mode it is in, in the
+control row, rather than letting a viewer assume a backend exists.
+
+Without `--static`, the script pushes the whole repo to a **Docker** Space
+running `mantis/api/site.py` - the console at `/` and the live API under `/api`,
+one process, one origin. **Hugging Face now bills Docker Spaces**: a free account
+gets a `402 Payment Required` on `create_repo`, and the script catches that and
+tells you to re-run with `--static`. Static Spaces stay free for everyone.
+
+First Docker build is ~3-5 minutes (npm, then pip). A static Space goes live in
+seconds, with no build step at all.
 
 ---
 
@@ -36,7 +67,14 @@ CORS header at all.
 **Hugging Face rather than Render or Railway**, and the reason is availability
 rather than elegance: a free dyno on either **sleeps after ~15 minutes idle and
 takes ~30 s to wake**, which is exactly the shape of a demo that looks broken at
-the moment a judge clicks it. A Docker Space stays warm on the free tier.
+the moment a judge clicks it.
+
+That argument survived the discovery that Docker Spaces are no longer free - it
+just resolved the other way. The static Space is a CDN, and a CDN has no cold
+start at all, which is a stronger version of the property we were buying. The
+composed container below is still the better *demo* (a real SSE stream instead of
+a client-side replay) and it is still what runs locally and what the Dockerfile
+builds; it is simply not what is deployed today.
 
 The container is small on purpose. `mantis/api/` runs no model inside a request —
 every score, metric and attribution is read off a committed artefact — so the
@@ -58,7 +96,7 @@ hf auth login          # stores it; the deploy script picks it up
 # or
 export HF_TOKEN=hf_...
 # or
-python scripts/deploy_hf.py --space <you>/mantis --token hf_...
+python scripts/deploy_hf.py --space <you>/mantis --static --token hf_...
 ```
 
 The token is never written into the repo. HARD RULE 4 is about a clean clone
@@ -67,10 +105,11 @@ needing no credentials, and deployment is the one place one is used.
 ### 2. Preflight
 
 ```bash
-python scripts/deploy_hf.py --check
+python scripts/deploy_hf.py --check --static     # 11 files, 1.5 MB
+python scripts/deploy_hf.py --check              # 430 files, 4.5 MB (docker)
 ```
 
-Lists what would be uploaded (~430 files, 4.5 MB) and names anything missing that
+Lists what would be uploaded and names anything missing that
 would produce a Space that builds and then serves an empty console — a missing
 `console_feed.json`, a `fidelity.json` that has never been generated, a frozen
 `web/public/data/fidelity.json` that is stale against it.
@@ -78,16 +117,17 @@ would produce a Space that builds and then serves an empty console — a missing
 ### 3. Push
 
 ```bash
-python scripts/deploy_hf.py --space <you>/mantis
+python scripts/deploy_hf.py --space <you>/mantis --static
 ```
 
-Creates the Space if it does not exist, uploads `deploy/hf/README.md` as the
-Space card (its YAML frontmatter is what tells Spaces it is Docker on port 7860),
-then uploads the build context. The Space builds `web/dist` itself from
-`web/src` in the Dockerfile's node stage, so the gitignored `dist` never has to
-be committed.
+Creates the Space if it does not exist, uploads the matching Space card
+(`deploy/hf/README-static.md` or `README.md` - the YAML frontmatter is what tells
+Spaces which SDK it is, and for Docker which port), then uploads the payload.
 
-Watch the **Logs** tab. The app lands at `https://<you>-mantis.hf.space`.
+Static lands immediately at `https://<you>-mantis.static.hf.space`. Docker builds
+`web/dist` itself from `web/src` in the Dockerfile's node stage - so the
+gitignored `dist` never has to be committed - and lands at
+`https://<you>-mantis.hf.space` after ~3-5 minutes. Watch the **Logs** tab.
 
 ### What is uploaded, and what is not
 
@@ -120,15 +160,15 @@ docker run -p 7860:7860 mantis
 
 ---
 
-## The fallback: static-only hosting
+## Other static hosts, if the Space fails on the night
 
-`web/dist` is still a **self-contained static site**. It carries frozen copies of
-every API response in `web/public/data/` — produced by calling the real route
-handlers, never by a second implementation — and replays the committed
-authorisation feed on a client-side timer. The console probes `/api/health` once
-with a two-second timeout and displays which mode it is in.
+`web/dist` is a **self-contained static site** wherever it is put. It carries
+frozen copies of every API response in `web/public/data/` — produced by calling
+the real route handlers, never by a second implementation — and replays the
+committed authorisation feed on a client-side timer. The console probes
+`/api/health` once with a two-second timeout and displays which mode it is in.
 
-So if the Space fails on the night:
+So any static host will do:
 
 ```bash
 make web
@@ -150,9 +190,13 @@ sleep caveat above.
 Verified from here already: a clean clone serves every endpoint, the composed app
 serves the console and the API on one origin, the SPA fallback resolves deep
 links while a mistyped asset still 404s, the SSE stream delivers well-formed
-frames, the docx regenerates from `RESULTS.md`, and 287 tests pass. What is
-**not** verified from here is the deployed URL, because that cannot be checked
-from this machine. Check it yourself:
+frames, the docx regenerates from `RESULTS.md`, and 287 tests pass. On the
+**deployed** URL, every asset and every frozen payload returns 200 and carries the
+numbers `RESULTS.md` quotes.
+
+What no check from this machine can tell you is whether the thing *looks* right —
+whether a chart overflows on a 390px screen, whether the drawer scrolls, whether
+the stream is watchable at six rows a second. Do that yourself:
 
 - [ ] Open the URL **on a phone**, on mobile data rather than the venue wifi.
 - [ ] Press **Start authorisation stream** and watch rows arrive and resolve
