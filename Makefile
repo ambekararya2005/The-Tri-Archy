@@ -1,4 +1,4 @@
-.PHONY: help install lint fmt test atlas schema population figure dataset probe corpus features l0 firewall render loop arena derived drift slices gate demo clean
+.PHONY: help install lint fmt test atlas schema population figure dataset probe corpus features l0 firewall render loop arena derived drift slices ood feed api web docx submission gate demo clean
 
 PY ?= python
 
@@ -23,6 +23,12 @@ help:
 	@echo "  drift    every marginal vs the reference, against a sampling-noise band"
 	@echo "  slices   audit every probe_slice and print its denominator"
 	@echo "  figure   redraw the calibration figure from the existing parquet"
+	@echo "  ood      L3 against hand-authored text it did not come from"
+	@echo "  feed     pre-score a window of authorisations for the live console"
+	@echo "  api      serve the console backend on :8000"
+	@echo "  web      build the React console (needs npm install in web/ first)"
+	@echo "  docx     generate the submission document FROM RESULTS.md"
+	@echo "  submission  ood + feed + docx + web: everything a judge is handed"
 	@echo "  gate     the daily acceptance gate"
 	@echo "  demo     THE acceptance test - must pass from a clean clone"
 
@@ -106,6 +112,39 @@ arena:
 # unnoticed. This runs the same gate over the matrix L1 actually trains on.
 derived:
 	$(PY) scripts/probe_derived.py
+
+# Day 6 carry-over: does L3 fire on an injection somebody else wrote? Ships
+# hand-authored payloads AND benign controls in the same registers, because the
+# recall number is uninterpretable without them. See the script's docstring.
+ood:
+	$(PY) scripts/l3_ood.py
+
+# Day 6: the live console's data. Fits the firewall once, offline, and writes
+# 600 pre-scored authorisations. The API then does NO model work per request.
+feed:
+	$(PY) scripts/build_console_feed.py
+
+# Day 6: the console backend. Serves RESULTS.md and arena.json straight from
+# disk plus the SSE authorisation stream. Nothing is recomputed per request.
+api:
+	$(PY) -m mantis.api
+
+# Day 6: the React console. `cd web && npm install` once, first.
+web:
+	cd web && npm run build
+
+# Day 6: THE submission document. Every figure is read out of RESULTS.md, so
+# this regenerates rather than being retyped. CLAUDE.md section 7: never cut.
+docx:
+	$(PY) scripts/build_docx.py
+
+# The three artifacts a judge receives, rebuilt in dependency order.
+submission: ood feed docx web
+	@echo ""
+	@echo "Submission artifacts:"
+	@echo "  1. repo       this working tree"
+	@echo "  2. document   docs/MANTIS_submission.docx"
+	@echo "  3. prototype  web/dist  (serve with: make api, then npm run preview)"
 
 # Day 4 carry-overs: distribution drift, and the probe-slice audit.
 drift:

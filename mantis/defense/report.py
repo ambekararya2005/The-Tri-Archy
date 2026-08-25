@@ -282,6 +282,8 @@ def write_results(result, pool: pd.DataFrame, path: Path) -> None:
           "rail, where there is no provenance chain to read. A layer that scored highly on "
           "everything would be a layer reading something other than the text.")
         w("")
+        w(_l3_ood_section())
+        w("")
 
     # ---------------------------------------------------------------- L2 / L2e
     w(_novelty_section(result))
@@ -422,6 +424,85 @@ def _l3_note(result) -> str:
         "family being held out of L1's training set, because L3 was never trained on transactions "
         "at all."
     )
+
+
+def _l3_ood_section() -> str:
+    """The out-of-distribution probe, read off ``scripts/l3_ood.py``'s artefact.
+
+    Absent until the probe has been run, and silent when it is — a section that
+    invented numbers because a file was missing would be worse than no section.
+    """
+    import json
+
+    from mantis.core.paths import GENERATED_DIR
+
+    path = GENERATED_DIR / "l3_ood.json"
+    if not path.exists():
+        return ""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+
+    ind, ood = data["in_distribution"], data["out_of_distribution"]
+    recal = data.get("recalibrated_oracle", {})
+    lines = [
+        "### The harder test: text L3 did not come from",
+        "",
+        "Both hold-outs above are still drawn from `data/cache/content/` — one 7B model, one "
+        "set of prompt templates, one register. A classifier can generalise perfectly across "
+        "the variants of a corpus and still be reading the corpus. So "
+        f"`scripts/l3_ood.py` scores {ood['n_injected']} hand-authored injection payloads and "
+        f"{ood['n_benign']} hand-authored **benign controls in the same registers** — HTML "
+        "comments, YAML, a fake system banner, transliterated Hindi-English, shouting, "
+        "txt-speak, Cyrillic homoglyphs — written by a different model from the one that "
+        "authored the corpus, and committed before they were scored.",
+        "",
+        "| | recall | FP on controls | ROC | n+ / n- |",
+        "|---|---|---|---|---|",
+        f"| in distribution (the corpus) | {ind['recall']:.3f} | {ind['fp_rate']:.3f} | "
+        f"{ind['roc']:.3f} | {ind['n_injected']} / {ind['n_benign']} |",
+        f"| **out of distribution** | {ood['recall']:.3f} | **{ood['fp_rate']:.3f}** | "
+        f"**{ood['roc']:.3f}** | {ood['n_injected']} / {ood['n_benign']} |",
+        "",
+    ]
+
+    if ood["fp_rate"] > 0.5:
+        lines += [
+            f"**Read the second column before the first.** L3 fires on {ood['recall']:.0%} of the "
+            f"novel injections — and on {ood['fp_rate']:.0%} of the *clean* pages written in the "
+            "same registers. The recall cell is therefore meaningless on its own, and this is "
+            "exactly why the benign controls were authored alongside the payloads rather than "
+            "afterwards: without them this table would have read as a triumph.",
+            "",
+            "**L3's decision threshold does not transfer.** Calibrated on one corpus and pointed "
+            "at text unlike it, the layer is a false-positive machine. What survives is the "
+            f"*ordering*: ROC {ind['roc']:.3f} → {ood['roc']:.3f}. Injected pages still rank "
+            "above clean ones by the same author in the same register",
+        ]
+        if recal.get("recall") is not None:
+            lines[-1] += (
+                f", and moving the threshold above the worst control recovers "
+                f"{recal['recall']:.0%} recall — an oracle number, since that threshold has seen "
+                "the answer, but enough to locate the defect in **calibration** rather than in "
+                "an absence of signal"
+            )
+        lines[-1] += "."
+        lines += [
+            "",
+            "**The named fix, not done today.** The page threshold is fitted on one corpus and "
+            "must instead be fitted on benign text drawn from the traffic it will actually see. "
+            "Longer term, a bag of words is the wrong model: it keys on lexical markers of "
+            "instruction — *do not*, *skip*, *without* — which is why prose that merely sounds "
+            "procedural trips it. The 1.000 in the table above is a real number about this "
+            "corpus and **not** a claim about the open web.",
+        ]
+    else:
+        lines += [
+            f"L3 keeps {ood['recall']:.0%} of its recall on text it did not come from, at "
+            f"{ood['fp_rate']:.0%} false positives on controls written in the same registers.",
+        ]
+    return "\n".join(lines)
 
 
 def _fusion_note(result) -> str:
@@ -724,19 +805,35 @@ def _arena_section() -> str:
             f"The loop recovers **{zero['gap_closed']:.0%}** of the collapse that holding the "
             "family out caused.",
             "",
-            "**What this claims, exactly.** The loop had access to F1's *atlas cards* — a written "
-            "description of a class of attack and an executable generator for it. It did not have "
-            "a single one of the F1 rows it is then evaluated on, and the variants are not those "
-            "rows: every gene moved them, and they were **selected for evading the detector**, so "
-            "they are off-distribution from the canonical attack in exactly the direction that "
-            "makes the transfer hard.",
+            "**What the detector had, and what the loop had. These are not the same thing, "
+            "and the whole claim turns on the difference.**",
             "",
-            "So the claim is *\"an attack family described in the atlas but never observed in the "
-            "data can be manufactured, and training on the manufactured version transfers to the "
-            "real one\"*. It is **not** *\"the detector caught something nobody had thought "
-            "of\"*. No model does that, which is the whole point of the reframing: we stopped "
-            "pretending an isolation forest could, and built the thing that actually works "
-            "instead.",
+            f"The *detector* never trained on a single real {zero['family']} event. That is what "
+            f"the middle row measures, and {zero['recall_family_held_out']:.3f} is what it gets "
+            "it for.",
+            "",
+            f"The *loop* had something else: {zero['family']}'s **atlas cards and their "
+            "executable injectors** — a written description of a class of attack, and code that "
+            "manufactures instances of it. That is a red team, not a fraud history. It is why "
+            "the third row is not magic and must never be described as the detector "
+            "generalising on its own: it did not generalise, it was **given manufactured "
+            "training data for a family it had never seen in the wild**, and that data was "
+            f"produced from a specification a human wrote before any {zero['family']} attack was "
+            "observed.",
+            "",
+            "The variants are still not the test rows. Every gene moved them, and they were "
+            "**selected for evading the detector**, so they sit off-distribution from the "
+            "canonical attack in exactly the direction that makes the transfer hard — which is "
+            "why the recovery is 66% and not 100%.",
+            "",
+            "**This is the realistic position on a new rail, and it is the point of the "
+            "project.** Agentic commerce has no labelled fraud history, and will not have one "
+            "until losses have already been taken. What it can have on day one is a red team: "
+            "people who can describe the attack and write the generator. The claim is therefore "
+            "*\"an attack family that has been described but never observed can be manufactured, "
+            "and training on the manufactured version transfers to the real one\"* — **not** "
+            "*\"the detector caught something nobody had thought of\"*. Nothing does that. "
+            "Somebody thought of it; the contribution is that thinking of it was enough.",
             "",
             "Measured on the loop's own two-seed background rather than the five-seed pool above, "
             "so all three rows share one dataset and one operating point. The Day 4 five-seed "

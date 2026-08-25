@@ -49,19 +49,30 @@ attack.
       **evolved variants** the arena produced for F1's cards. Recall on the same
       real F1 test rows.
 
-What the loop had access to: F1's *atlas cards*, which is to say a written
-description of a class of attack and an executable generator for it. What it did
-not have: a single one of the F1 rows it is then evaluated on. The variants are
-not those rows — every gene moved them, and they were **selected for evading the
-detector**, so they are systematically off-distribution from the canonical attack
-in exactly the direction that makes the transfer hard.
+**The detector and the loop had different things, and the claim turns on that.**
 
-So the honest statement of the result is: *"an attack family described in the
-atlas but never observed in the data can be manufactured, and training on the
+The *detector* never trained on a single real F1 event. Not one. That is exactly
+what the baseline row measures, and 0.013 is what it earns for it.
+
+The *loop* had F1's **atlas cards and their executable injectors** — a written
+description of a class of attack, plus code that manufactures instances of it.
+That is **a red team, not a fraud history**, and the distinction is the entire
+contribution. The augmented detector did not generalise to F1 on its own; it was
+handed manufactured F1 training data produced from a specification a human wrote
+*before any F1 attack had been observed in the wild*.
+
+What the loop still did not have: a single one of the F1 rows it is then
+evaluated on. The variants are not those rows — every gene moved them, and they
+were **selected for evading the detector**, so they are systematically
+off-distribution from the canonical attack in exactly the direction that makes
+the transfer hard. That is why the recovery is partial rather than total.
+
+So the honest statement of the result is: *"an attack family that has been
+described but never observed can be manufactured, and training on the
 manufactured version transfers to the real one."* Not *"the detector caught
-something nobody had thought of"* — nobody in this project has ever claimed a
-model can do that, and the whole point of the reframing is that we stopped
-pretending an isolation forest could.
+something nobody had thought of"* — nothing does that. Somebody thought of it.
+The contribution is that **thinking of it was enough**, which is the only
+position available on a rail that has no loss history yet.
 """
 
 from __future__ import annotations

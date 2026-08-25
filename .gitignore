@@ -40,6 +40,22 @@ data/generated/*
 # RESULTS.md is rendered from it.
 !data/generated/arena.json
 
+# ...and the three small artefacts the live console and the submission document
+# are served from. Same reasoning as arena.json and as the LLM cache: HARD RULE 4
+# says the repo must run from a clean clone with no GPU and no network, and the
+# console is on the "never cut" list. A judge who clones this and runs
+# `make api` must get a working authorisation stream without first spending two
+# minutes fitting LightGBM.
+#
+# console_feed.json is ~1 MB of pre-scored authorisations and is the only one of
+# these that is not trivially small; it is committed anyway, because without it
+# the demo does not exist. Regenerate any of them with `make feed` / `make ood`.
+# The parquets above it stay ignored - they are 15-85 MB and reproducible.
+!data/generated/console_feed.json
+!data/generated/l3_ood.json
+!data/generated/population.manifest.json
+!data/generated/dataset_v1.manifest.json
+
 # The LLM cache IS committed on purpose. A judge cloning this repo will not
 # have Ollama running, so the cache is what makes `make demo` work offline.
 # See CLAUDE.md HARD RULE 3. Do not add data/cache/ here.

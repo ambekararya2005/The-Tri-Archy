@@ -48,7 +48,36 @@ Individual stages, each runnable on its own:
 | `make l0` | the nine deterministic clauses, per-clause precision and FP rate |
 | `make firewall` | the five layers, the fusion weights, leave-one-family-out, and `RESULTS.md` (~15 min) |
 | `make loop` | the evasion curve and the zero-day comparison → `data/generated/arena.json` (~30 min) |
+| `make ood` | L3 against 18 hand-authored injections **and 10 benign controls in the same registers** — the number that says its 1.000 is about a corpus, not the open web |
+| `make feed` | pre-scores 600 authorisations for the console, so the API fits nothing at request time (~2 min) |
+| `make api` | the console backend on `:8000`, docs at `/docs` |
+| `make web` | builds the React console (run `cd web && npm install` once first) |
+| `make docx` | the submission document, **generated from RESULTS.md** — regenerate, never retype |
 | `make test` | the suite |
+
+## Seeing it run
+
+```
+make api                      # terminal 1 — the backend on :8000
+cd web && npm install && npm run dev   # terminal 2 — the console on :5173
+```
+
+Press **Start authorisation stream**. Authorisations arrive one at a time and
+are scored in front of you: a risk index, which layers fired, the decision, and
+the three features that drove it. Rows resolve red or green as the outcome
+lands.
+
+Two things the console is careful about, because they are the difference between
+a demo and a demonstration. The scored event and the ground truth are **separate
+objects on the wire** — the UI renders the decision from one and reveals the
+outcome from the other, so it cannot colour a row before the score arrives. And
+the stream **says what it is**: the replay over-samples fraud roughly 25x against
+its true 1% prevalence so that something happens while you watch, and that
+sentence is printed in the console header rather than buried in a manifest.
+
+The **Results** tab is static and reads every figure from `RESULTS.md` through
+the API. Nothing on it is typed into the interface, so a retrain moves the
+numbers on the screen without anyone editing TypeScript.
 
 **Where it stands.** 42 vectors mapped, **15 with a working injector** — the atlas
 is a dependency of the generator, not documentation next to it, and
@@ -72,4 +101,13 @@ family it never trained on. What answers both is not a cleverer anomaly score: i
 is protocol invariants that need no training data, plus a loop that manufactures
 the attack before an attacker does.
 
-Still to come: the fidelity scorecard and the live defence console.
+**Say the zero-day result precisely.** The detector never trained on a single
+real F1 event — that is the collapse, 0.811 down to 0.013. What recovers it to
+0.539 is not the model generalising on its own: it is being handed *manufactured*
+F1 data, produced by the loop from F1's atlas cards and injectors. The loop had
+the generator; the detector never had the attack. **On a new rail you have a red
+team, not a fraud history**, and the claim is that a red team is enough —
+described-but-never-observed attacks can be manufactured, and training on the
+manufactured version transfers to the real one.
+
+Still to come: the fidelity scorecard.
