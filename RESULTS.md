@@ -295,12 +295,180 @@ It has not been silently removed and it has not been silently kept:
 | `ent_merchant_n_events` | 2.26% |
 | `vel_mandate_hash_count_1h` | 2.09% |
 
+## Fidelity of the simulation
+
+Every detection figure above is measured on data this project generated, which makes all of them conditional. This is the measurement of what the condition is worth, and it is deliberately unflattering: a scorecard where everything came out green would be evidence that it was measuring the wrong things.
+
+| | |
+|---|---|
+| reference panel | Kaggle kartik2112/fraud-detection (Sparkov): fraudTrain.csv, fraudTest.csv. 1,852,394 rows, cut to 200,051 over 2019-12-17..2020-03-15. US panel, USD, itself synthetic - see mantis/foundry/fidelity/real.py. |
+| population calibration | `indian-market-priors` |
+| discriminator, all shape features | **0.9994** (target 0.5) |
+| discriminator, adjudicated axes removed | **0.8399** |
+| TSTR transfer ratio | 0.030 |
+| correlation-matrix RMS error | 0.076 |
+
+### Nothing is compared raw, and that is the first thing to check
+
+A rupee population with an agentic rail cannot be compared to a dollar panel without one on absolute amount, category, geography, BIN, 3-D Secure or channel. Doing it would produce a large number that measures the difference between two countries. Both sides are projected into a **dimensionless shape space** first — the diurnal curve, within-category amount dispersion, burstiness against each cardholder's own rhythm, and merchant rank-frequency — and every distance below lives there.
+
+The agentic rail is excluded from the synthetic side for the sharpest version of the same reason: **the reference panel has no agentic transactions, because no panel does.** That absence is the premise of the whole project, and it is also the limit of what this section can claim.
+
+The two panels differ in *level* as well as in shape, and the levels are reported with **no distance attached** — a ratio between two panels' cardholder velocity is a fact about how each was composed:
+
+| level | synthetic | reference | ratio |
+|---|---|---|---|
+| cardholders | 4,947 | 918 | 5.39x |
+| merchants | 10,590 | 693 | 15.28x |
+| txn / cardholder / day | 0.369 | 2.449 | 0.15x |
+| top 1% merchant share | 0.322 | 0.019 | 16.58x |
+
+### Marginals, each against its own sampling-noise band
+
+No distance here is compared against a threshold somebody made up. Every band is bootstrapped from the reference distribution itself at these sample sizes, so a ratio of 1.0 means *indistinguishable from sampling noise* and the ratio is the number to read. Sorted worst first.
+
+| feature | metric | distance | noise band | x band |
+|---|---|---|---|---|
+| `hour` | JSD | 0.0721 | 0.0000 | 1,649.1 |
+| `dow` | JSD | 0.0115 | 0.0000 | 643.0 |
+| `burst_1h` | JSD | 0.0026 | 0.0000 | 438.2 |
+| `merchant_rank_pct` | KS | 0.5234 | 0.0054 | 96.1 |
+| `category_shift` | JSD | 0.0005 | 0.0000 | 74.7 |
+| `gap_ratio_log` | KS | 0.0909 | 0.0054 | 16.7 |
+| `amount_vs_customer` | KS | 0.0828 | 0.0054 | 15.2 |
+| `log_amount_z` | KS | 0.0325 | 0.0054 | 6.0 |
+
+Marginals alone are not enough: a generator can match every one of them and still draw each column independently. The Spearman correlation matrices differ by an RMS of **0.076** off the diagonal (Frobenius 0.568 over 8 features). The worst pair is `amount_vs_customer x merchant_rank_pct`: -0.004 here against -0.259 in the reference.
+
+### TSTR — and it does not transfer
+
+| model | trained on | tested on | AUC-PR | ROC | lift over baseline |
+|---|---|---|---|---|---|
+| **TRTR** | real | real | 0.8353 | 0.9878 | 121x |
+| **TSTR** | synthetic | real | 0.0249 | 0.6385 | 3.6x |
+| **TRTS** | real | synthetic | 0.0098 | 0.5175 | |
+
+The transfer ratio is **0.030**, and stating that as a failure of realism would be the easy reading and the wrong one. The gain tables say what actually happened:
+
+| feature | gain, trained on real | gain, trained on synthetic |
+|---|---|---|
+| `log_amount_z` | 57.6% | 17.1% |
+| `amount_vs_customer` | 16.5% | 16.0% |
+| `hour` | 13.0% | 6.7% |
+| `merchant_rank_pct` | 6.3% | 35.8% |
+| `gap_ratio_log` | 4.9% | 15.8% |
+
+A detector trained on the reference panel spends 58% of its gain on `log_amount_z`. One trained on ours spends 36% on `merchant_rank_pct`. **The two panels' fraud are different phenomena living in different features** — Sparkov's fraud is an amount anomaly, and this project's classic-rail attacks were built specifically so that no single raw column separates them above 0.95 AUC. TRTS confirms the symmetry: a model trained on real data scores ROC 0.517 on ours, which is chance.
+
+So the honest reading is that TSTR measures *whether the two datasets' fraud is the same phenomenon*, and here it is not, by construction. It is **not** evidence that the background population is unrealistic — the marginal and discriminator sections are what speak to that.
+
+TSTR is measured on classic-rail fraud only. The reference panel contains no agentic transactions, so no number here is evidence about the agentic attacks.
+
+### The discriminator — the only test that sees interactions
+
+Label the synthetic rows 1, the real rows 0, and fit a gradient-boosted tree on the shape features, scored out of fold on balanced subsamples. **The target is 0.5**: here, higher is worse.
+
+Result: **0.9994** (99.9% separable). Separable at 100%. On these features the synthetic population is not passing for the reference panel, and the scorecard says so.
+
+| feature | separable alone (AUC) | gain share |
+|---|---|---|
+| `merchant_rank_pct` | 0.8288 | 79.3% |
+| `hour` | 0.5643 | 7.3% |
+| `gap_ratio_log` | 0.5302 | 3.2% |
+| `burst_1h` | 0.5211 | 1.7% |
+| `amount_vs_customer` | 0.5170 | 5.4% |
+| `category_shift` | 0.5075 | 0.1% |
+| `dow` | 0.5056 | 0.3% |
+| `log_amount_z` | 0.5002 | 2.7% |
+
+#### Which side is the anomalous one?
+
+A discriminator says a difference exists. It does not say which panel is wrong, and the temptation three days before a submission is to assume it is the reference. So the rule is that **an adjudication must carry a measurement**: a divergence is attributed to the reference panel only when a third quantity, independent of both and agreed before either dataset existed, says the reference is the side that departs from it.
+
+| feature | test | synthetic | reference | verdict |
+|---|---|---|---|---|
+| `hour` | retail spend has a diurnal curve (overnight trough) | peak/trough 22.5x | peak/trough 1.6x | **reference** |
+| `merchant_rank_pct` | an acceptance estate is Zipf, not uniform (top 10% >> 10%) | top 10% carry 66.0%, max/min 2,980x | top 10% carry 14.6%, max/min 6x | **reference** |
+
+Sparkov's hour-of-day curve is a two-level step rather than a diurnal curve, and its 693 merchants are close to uniformly popular. Neither is a defect in that dataset for its own purpose — it exists to benchmark fraud classifiers, and a flat time curve does not hurt that — but it does mean those two axes cannot measure this project's fidelity.
+
+With them removed the discriminator falls to **0.8399** (68.0% separable). **Both numbers are quoted because the ablation is a judgement**: the full discriminator is the measurement, the ablated one is the measurement after a judgement a reader is free to reject. And 0.84 is still high — the remaining features are individually close (every one under 0.54 alone) and the separation is in their *joint* structure, which is the same thing the correlation-matrix distance measures and is the foundry's most substantial outstanding item.
+
+### Divergences we name ourselves
+
+Found before this scorecard existed, measured, and deliberately left in place. A scorecard that names its own divergences is worth more than one where a judge finds them.
+
+**decline_reason remapping** — invalid_cvv 0.130 -> 0.036, expired 0.080 -> 0.033; 302x its band.
+
+Reasons are remapped where the entry mode makes them impossible - invalid_cvv becomes do_not_honor where no CVV was presented, expired becomes insufficient_funds where the mode cannot expire. Only ~27% of declines are on a CVV-bearing entry mode, so 73% of drawn invalid_cvv gets remapped, which is far larger than the code comment claimed. Conservative for detection: it raises the background rate of the reasons F4-27 farms, which makes that attack's lift smaller rather than larger. Re-tuning it re-rolls every pinned calibration number three days before submission.
+
+**realised decline rate above prior** — moto 2.32x (0.325 vs 0.140), upi_p2p 1.44x, ecom 1.33x, agentic 1.24x; overall 0.088 against a mix-weighted nominal 0.074.
+
+decline_amount_tilt multiplies the per-channel rate by exp(0.55 z), whose expectation is exp(0.55^2/2) = 1.16. That is Jensen's inequality, not a redistribution: the tilt should be mean-preserving per channel and is not. Same reason, and the same direction: a higher decline background makes the card-testing attacks harder to catch, not easier. Recorded as a Day 7 scorecard item rather than a silent edit.
+
+## Scoring latency
+
+Measured **one event at a time** against state warmed on 282,968 training events — not a batch divided by its row count, which is the usual way a latency claim turns out to be false in production. 400 events timed.
+
+| | p50 | p95 | p99 | max |
+|---|---|---|---|---|
+| end to end | 117.1 ms | 152.6 ms | **171.4 ms** | 185.5 ms |
+
+Against a **50 ms** authorisation-host budget, that is **over** budget.
+
+| stage | mean | p99 | share | per row in batch | overhead |
+|---|---|---|---|---|---|
+| `velocity` | 0.138 ms | 0.660 ms | 0.1% | 0.1383 ms | — |
+| `graph` | 0.126 ms | 0.357 ms | 0.1% | 0.1257 ms | — |
+| `transaction` | 7.353 ms | 11.034 ms | 6.1% | 0.0244 ms | 301x |
+| `entity` | 47.031 ms | 63.058 ms | 39.1% | 0.1290 ms | 364x |
+| `mandate` | 5.111 ms | 9.077 ms | 4.2% | 0.0192 ms | 266x |
+| `L0` | 0.859 ms | 1.802 ms | 0.7% | 0.0042 ms | 206x |
+| `L1` | 3.344 ms | 5.979 ms | 2.8% | 0.0156 ms | 214x |
+| `L2` | 45.150 ms | 66.103 ms | 37.5% | 0.1877 ms | 241x |
+| `L3` | 0.048 ms | 0.102 ms | 0.0% | 0.0018 ms | 27x |
+| `fusion+policy` | 11.221 ms | 14.898 ms | 9.3% | 0.0365 ms | 307x |
+
+### Read the last two columns before the p99
+
+Most of the clock goes to `entity`, which costs 47.0 ms called with one row and 0.1290 ms per row called with many — a factor of **364**. That is per-call overhead in pandas and scikit-learn, not model work: `Series.map(dict)` materialises the lookup table into an index on every call, so a feature block pays that cost once per feature to look up one value.
+
+**The fix is named and not applied.** A plain dictionary lookup on the single-event path removes it, and the feature builder is shared with the offline pass behind every pinned number in this document. Three days out, this project records the finding rather than re-rolls the tables for it.
+
+The two stages that genuinely **cannot** be batched — the stateful stores, which must read state before folding the event in, and which are therefore the same code online and offline — cost `velocity` 0.660 ms p99 and `graph` 0.357 ms p99, **1.02 ms together**. Those are the numbers that would survive a rewritten scoring path, and they are the ones the architecture was designed around: one forward pass, `bisect` and prefix sums per window, union-find over the identity graph, bounded memory by eviction.
+
+The honest headline is therefore both sentences: **the current implementation misses a 50 ms budget at p99 (171 ms), and the miss is in the calling convention rather than in the models.** Quoting only the second would be an estimate dressed as a measurement; quoting only the first would invite the conclusion that a five-layer firewall cannot run inline, which this measurement does not support.
+
+## Two things a deployment would need to know
+
+### Fusion consumes L3's score, not L3's decision
+
+This matters more than it sounds like it does, and the L3 out-of-distribution result above is why.
+
+`FusionModel` gives every layer **three columns**: its percentile against the legitimate score distribution, its raw score standardised on the fusion window's legitimate rows, and — where the layer is sometimes silent — an indicator for whether it had an opinion at all. No threshold is applied to any layer before fusion. L3's page threshold is used for *reporting* L3 as a standalone layer and for nothing else.
+
+That is the right way round, and it is what makes the out-of-distribution finding survivable. L3's threshold **does not transfer** to text unlike its training corpus: pointed at hand-authored payloads it fires on 100% of the injections and on 90% of the *clean* controls written in the same registers. A fused score that consumed L3's thresholded decision would inherit that failure directly — every procedural-sounding page would arrive at fusion as a hard vote for fraud, on a layer whose calibration had silently stopped being valid.
+
+Consuming the score instead means the stacker sees L3's *ordering*, which is what survived the transfer: ROC falls 0.999 → 0.811 rather than collapsing. The percentile column is re-derived from the deployment's own legitimate traffic every time fusion is fitted, so a shift in L3's absolute scale is re-absorbed at the next refit rather than becoming a permanent bias. And the fitted weight is the check on the whole arrangement: on this data the stacker put **-0.943** on L3's percentile and **+0.353** on its standardised raw score, which is the model saying it trusts the layer's ordering while discounting the calibration that produced the percentile. That is a discount a decision-consuming fusion could not have applied.
+
+### What the non-transferring threshold means for deploying on novel text
+
+Stated plainly, because it is the largest single caveat on the agentic side of this architecture: **L3 as calibrated here cannot be pointed at the open web.** It is a classifier fitted on one 7B model's output through one set of prompt templates in one register, and its decision boundary is a property of that corpus rather than of injected text in general.
+
+Three consequences for a deployment, in the order they would bite:
+
+1. **Fit the page threshold on the traffic it will see, not on the corpus it was trained on.** The benign side of that calibration set is the part that matters and the part that is easy to get for free — it is the pages agents read on ordinary, approved authorisations, which an issuer accumulates without labelling anything. The 90% false-positive rate on hand-authored controls is what happens when this step is skipped.
+2. **Do not promote L3 to a standalone decision.** Its recall is real on two of fifteen cards and its ordering transfers; its calibration does not. It belongs behind fusion, where a fitted weight can discount it, and behind L0, where the protocol invariants need no calibration at all.
+3. **A bag of words is the wrong long-term model, and the failure mode says why.** It keys on lexical markers of instruction — *do not*, *skip*, *without* — which is precisely why prose that merely sounds procedural trips it. The 1.000 recall on F1-01 and F1-03 is a true statement about this corpus and is not a claim about text in general.
+
+The general form of this is worth keeping, because it is not specific to L3: **a layer whose ordering transfers and whose calibration does not is still useful, provided nothing downstream consumes its threshold.** The architecture already satisfies that condition; it was not designed to, and the out-of-distribution probe is what turned an accident into a checked property.
+
 ## What this does not claim
 
-- **This is not real-world performance.** It is measured on synthetic data whose attacks we wrote. The fidelity scorecard (Day 7) is the argument that the background is realistic; nothing here substitutes for it.
+- **This is not real-world performance.** It is measured on synthetic data whose attacks we wrote. The fidelity scorecard above is the argument that the background is realistic, and it is a qualified argument: read its discriminator row before reading any recall here.
 - **F5 is absent from every table.** It is the zero-day holdout family and has no implemented injector, so it is not in the data and cannot be scored. The leave-one-family-out columns and the loop experiment are the closest available stand-ins.
 - **L2 is not a detector and is no longer presented as one.** See the section above.
 - **L3 covers two of fifteen cards.** It is a specialist, and its overall recall should be read as coverage of the agentic-injection rail rather than as a headline.
 - **The current event's own outcome is never a feature.** `auth_response`, `settled` and `settlement_lag_hours` of the row being scored are blocked by name in the feature builder, alongside the label and post-hoc columns. Feeding them in would raise F4-27's recall substantially and mean nothing — an issuer cannot decline a transaction because it was declined.
-- **Latency is not measured here.** The feature pass is 0.052 ms/row and the graph pass 0.021 ms/row, but an end-to-end p99 for the whole firewall is a Day 7 number and is not quoted before it is measured.
+- **The measured latency is over budget, and the section above says so.** What is *not* claimed is the reverse: no number here is an estimate of what a rewritten scoring path would cost. The p99 is what this implementation does today.
 

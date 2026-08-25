@@ -54,6 +54,7 @@ ROUTES: Final[tuple[tuple[str, str, str, dict[str, Any] | None], ...]] = (
     ("results.json", "GET", "/results", None),
     ("arena.json", "GET", "/arena", None),
     ("fidelity.json", "GET", "/fidelity", None),
+    ("latency.json", "GET", "/latency", None),
 )
 
 
@@ -85,6 +86,26 @@ def main() -> None:
         target = OUT_DIR / name
         target.write_text(json.dumps(response.json(), separators=(",", ":")), encoding="utf-8")
         print(f"  {name:<16} {target.stat().st_size / 1024:>8.0f} KB")
+        written += 1
+
+    # Every atlas card in full, as one map keyed by id.
+    #
+    # /atlas/{id} is a route per card, and a static host has no routes. The
+    # offline console therefore needs the details in a single file it can load
+    # once - 42 cards is about 60 KB, which is cheaper than 42 requests would be
+    # even against a live API. Built by calling the real route handler for each
+    # card, like every other frozen response here, so there is no second
+    # implementation of the card shape.
+    detail = {}
+    for card in client.get("/atlas").json()["cards"]:
+        one = client.get(f"/atlas/{card['id']}")
+        if one.status_code == 200:
+            detail[card["id"]] = one.json()
+    if detail:
+        target = OUT_DIR / "atlas_cards.json"
+        target.write_text(json.dumps(detail, separators=(",", ":")), encoding="utf-8")
+        print(f"  {'atlas_cards.json':<16} {target.stat().st_size / 1024:>8.0f} KB  "
+              f"({len(detail)} cards)")
         written += 1
 
     # The feed is written from the store rather than through a route, because no

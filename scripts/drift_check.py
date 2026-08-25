@@ -71,103 +71,23 @@ if str(REPO_ROOT) not in sys.path:
 
 from mantis.core.paths import DOCS_DIR, ensure_dir  # noqa: E402
 from mantis.foundry.base.reference import ReferenceStats, load_reference_stats  # noqa: E402
-from mantis.foundry.base.simulator import (  # noqa: E402
-    SimulationConfig,
-    simulate_frame,
+from mantis.foundry.base.simulator import SimulationConfig, simulate_frame  # noqa: E402
+
+# Day 7 lifted these out of this script so the fidelity scorecard could use the
+# same implementation rather than a second copy that drifts from it. The formulae
+# are unchanged, so every number this script printed on Day 4 it still prints;
+# only their address moved.
+from mantis.foundry.fidelity.metrics import (  # noqa: E402
+    KS_99,
+    entity_jsd_null_band,
+    jsd,
+    jsd_null_band,
 )
-
-#: Bootstrap replicates for the null band. 200 is enough for a 99th percentile
-#: to be stable to the third decimal, and keeps the whole script under a minute.
-BOOTSTRAP: Final[int] = 200
-
-#: Quantile of the null distribution a realised distance must stay under.
-NULL_Q: Final[float] = 0.99
-
-#: KS 99% critical coefficient: ``P(sqrt(n) D > 1.63) ~= 0.01``.
-KS_99: Final[float] = 1.63
-
+from mantis.foundry.fidelity.metrics import ratio as _ratio  # noqa: E402
 
 # --------------------------------------------------------------------------- #
 # Distances
 # --------------------------------------------------------------------------- #
-
-
-def jsd(p: np.ndarray, q: np.ndarray) -> float:
-    """Jensen-Shannon divergence in bits. 0 identical, 1 disjoint."""
-    p = np.asarray(p, dtype=float)
-    q = np.asarray(q, dtype=float)
-    p = p / p.sum() if p.sum() > 0 else p
-    q = q / q.sum() if q.sum() > 0 else q
-    m = 0.5 * (p + q)
-
-    def _kl(a: np.ndarray, b: np.ndarray) -> float:
-        keep = a > 0
-        return float(np.sum(a[keep] * np.log2(a[keep] / b[keep])))
-
-    return 0.5 * _kl(p, m) + 0.5 * _kl(q, m)
-
-
-def jsd_null_band(target: np.ndarray, n: int, rng: np.random.Generator) -> float:
-    """The JSD that ``n`` honest draws from ``target`` produce, at ``NULL_Q``.
-
-    This is the whole point of the script: a distance is only evidence if it is
-    bigger than what perfect sampling would have given you anyway.
-    """
-    target = np.asarray(target, dtype=float)
-    target = target / target.sum()
-    if n <= 0:
-        return float("inf")
-    if (target > 0).sum() <= 1:
-        # A degenerate target -- entry_mode|moto is 100% ecom_keyed, threeds on
-        # card_present is 100% not_applicable -- has no sampling noise at all, so
-        # there is no band to compute. Any deviation is a real one.
-        return 0.0
-    draws = rng.multinomial(n, target, size=BOOTSTRAP).astype(float)
-    dists = [jsd(row / n, target) for row in draws]
-    return float(np.quantile(dists, NULL_Q))
-
-
-def entity_jsd_null_band(
-    weights: np.ndarray, target: np.ndarray, rng: np.random.Generator
-) -> float:
-    """Null band for a value drawn **per entity** and observed **per event**.
-
-    ``merchant_country`` is drawn once per merchant; ``card_bin`` once per card;
-    ``ag_agent_platform`` once per agent. The events then inherit it. Because
-    merchant popularity is Zipf-distributed, one lucky draw on a head merchant
-    moves the event-level marginal by far more than 1/n, and a null band computed
-    at ``n = 200,000`` is wrong by an order of magnitude -- it will call ordinary
-    sampling noise "drift" every single time.
-
-    The correct null re-draws the value for every entity from the target and
-    re-weights by that entity's **realised** event count, which is exactly what
-    this does. ``weights`` is one event count per entity.
-    """
-    target = np.asarray(target, dtype=float)
-    target = target / target.sum()
-    weights = np.asarray(weights, dtype=float)
-    total = weights.sum()
-    if total <= 0 or (target > 0).sum() <= 1:
-        return 0.0
-    dists = []
-    for _ in range(BOOTSTRAP):
-        assigned = rng.choice(len(target), size=weights.size, p=target)
-        mass = np.bincount(assigned, weights=weights, minlength=len(target)) / total
-        dists.append(jsd(mass, target))
-    return float(np.quantile(dists, NULL_Q))
-
-
-def _ratio(distance: float, band: float) -> float:
-    """Distance as a multiple of its null band, with the degenerate case handled.
-
-    ``entry_mode | moto`` is 100% ``ecom_keyed`` and ``threeds | card_present``
-    is 100% ``not_applicable``. A one-level target has no sampling noise, so its
-    band is zero -- and dividing by it turned six exactly-correct distributions
-    into ``inf DRIFT``. A zero distance against a zero band is a perfect match.
-    """
-    if band > 0:
-        return distance / band
-    return 0.0 if distance <= 0 else float("inf")
 
 
 def _mixture_amount_cdf(stats: ReferenceStats, x: np.ndarray) -> np.ndarray:

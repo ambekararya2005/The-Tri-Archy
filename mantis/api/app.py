@@ -55,6 +55,7 @@ from mantis.api.models import (
     AtlasResponse,
     FidelityResponse,
     HealthResponse,
+    LatencyResponse,
     ObservableSignalOut,
     ResultsResponse,
     ResultsTable,
@@ -277,30 +278,84 @@ def arena() -> ArenaResponse:
 
 @app.get("/fidelity", response_model=FidelityResponse, tags=["results"])
 def fidelity() -> FidelityResponse:
-    """The fidelity scorecard.
+    """The fidelity scorecard, straight from ``data/generated/fidelity.json``.
 
-    Reports ``available: false`` rather than 404-ing while Day 7 is outstanding,
-    so the console renders an honest "not measured yet" panel instead of an
-    error. Population calibration from the Day 1 manifest is returned in the
-    meantime, because it is measured and it is real — it is simply not the
-    scorecard.
+    Reports ``available: false`` rather than 404-ing when the scorecard has never
+    been generated, so the console renders an honest "not measured yet" panel
+    instead of an error. The Day 1 population manifest is returned in that case,
+    because it is measured and real — it is simply not the scorecard.
+
+    Note the two states inside ``available: true``. A scorecard produced without
+    the reference panel carries ``reference.available == false`` and has no
+    marginal, TSTR or discriminator section, and the console must render that as
+    "not measured" rather than as zero. See
+    :mod:`mantis.foundry.fidelity.scorecard`.
     """
-    if STORE.fidelity is not None:
+    card = STORE.fidelity
+    if card is None:
         return FidelityResponse(
-            available=True,
-            note="Fidelity scorecard, measured.",
-            metrics=list(STORE.fidelity.get("metrics", [])),
-            population=dict(STORE.fidelity.get("population", {})),
+            available=False,
+            note=(
+                "The fidelity scorecard has not been generated. Run "
+                "'make reference && make fidelity'. The population calibration below "
+                "comes from the Day 1 manifest; it is measured, but it is not the "
+                "scorecard."
+            ),
+            population=dict(STORE.population or {}),
         )
+
+    has_panel = bool(card.get("reference", {}).get("available"))
     return FidelityResponse(
-        available=False,
+        available=True,
         note=(
-            "The fidelity scorecard (marginal KS distances, MCC/amount/hour mixes vs "
-            "reference, TSTR) is Day 7's deliverable and has not been measured yet. "
-            "The population calibration below is measured and comes from the Day 1 "
-            "manifest; it is not a substitute for the scorecard."
+            "Measured against the Sparkov reference panel on dimensionless shape "
+            "features."
+            if has_panel
+            else "Generated without a reference panel: sections 2-4 were skipped."
         ),
+        generated=str(card.get("generated", "")),
+        schema_version=str(card.get("schema_version", "")),
+        calibration=dict(card.get("calibration", {})),
+        reference=dict(card.get("reference", {})),
+        synthetic=dict(card.get("synthetic", {})),
+        headline=dict(card.get("headline", {})),
+        marginals=dict(card.get("marginals", {})),
+        tstr=dict(card.get("tstr", {})),
+        discriminator=dict(card.get("discriminator", {})),
+        discriminator_ablated=dict(card.get("discriminator_ablated", {})),
+        adjudications=list(card.get("adjudications", [])),
+        known_divergences=list(card.get("known_divergences", [])),
         population=dict(STORE.population or {}),
+    )
+
+
+@app.get("/latency", response_model=LatencyResponse, tags=["results"])
+def latency() -> LatencyResponse:
+    """Per-event scoring latency against the 50 ms authorisation budget.
+
+    The other half of criterion 5, and the one ``RESULTS.md`` refused to quote
+    before it was measured. Written by ``scripts/latency_bench.py``.
+    """
+    payload = STORE.latency
+    if payload is None:
+        return LatencyResponse(
+            available=False,
+            note=(
+                "Latency has not been measured. Run 'make latency'. No number is "
+                "substituted for it."
+            ),
+        )
+    return LatencyResponse(
+        available=True,
+        note=str(payload.get("note", "")),
+        generated=str(payload.get("generated", "")),
+        n_events=int(payload.get("n_events", 0)),
+        warm_events=int(payload.get("warm_events", 0)),
+        budget_ms=float(payload.get("budget_ms", 0.0)),
+        within_budget=bool(payload.get("within_budget", False)),
+        headroom=float(payload.get("headroom", 0.0)),
+        end_to_end_ms=dict(payload.get("end_to_end_ms", {})),
+        stages_ms=dict(payload.get("stages_ms", {})),
     )
 
 

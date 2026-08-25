@@ -381,6 +381,120 @@ When time runs out — and it will — sacrifice in **this order**, top first:
     chance. Mean recall lost to holding a family out: **+0.277**. 264 tests,
     ruff clean. Full tables in `RESULTS.md`.
 
+- **Day 7 complete** — the third artifact, the scorecard, and the latency number:
+  - **One container, one origin.** `mantis/api/site.py` mounts the Day 6 API
+    unchanged at `/api` and serves the built Vite bundle at `/`. `api.ts` already
+    defaulted `API_BASE` to the relative `/api`, so a same-origin build needs no
+    `VITE_API_BASE` and never exercises a CORS header. The `Dockerfile` is now
+    two stages (node builds `web/dist`, python serves it) and installs the new
+    `serve` extra only — **verified** that importing `mantis.api.site` loads none
+    of pandas, numpy, sklearn, scipy, lightgbm, shap, matplotlib, networkx or
+    pyarrow, which takes the image from ~1.5 GB to ~200 MB.
+    `scripts/deploy_hf.py` pushes it to a Hugging Face Docker Space; Spaces
+    rather than Render/Railway because a free dyno on either **sleeps after 15
+    minutes** and a judge clicking a cold URL sees a spinner.
+  - **`data/reference/` had no Sparkov CSV** — Day 1 ran on the committed
+    Indian-market priors, as `ReferenceStats.source` said all along. Kaggle's
+    public download endpoint needs no token, so `scripts/fetch_reference.py`
+    now pulls the 210 MB panel on demand. It is **gitignored**, and it is used to
+    *measure* the population, never to refit it: refitting would re-roll every
+    pinned number three days out.
+  - **`mantis/foundry/fidelity/`** — criterion 2's artefact. Five sections:
+    provenance, marginals (KS/JS against bootstrapped noise bands + correlation
+    Frobenius), TSTR, a real-vs-synthetic discriminator with target 0.5, and the
+    two known divergences named on its own face. `metrics.py` was **lifted out of
+    `scripts/drift_check.py`** so there is one implementation, not two —
+    `tests/test_fidelity.py` asserts the identity.
+  - **`scripts/latency_bench.py`** — per-event p50/p95/p99 through the full fused
+    stack against a 50 ms budget, timed **one event at a time against warm
+    state**, plus the same stages in batch so the per-call overhead is visible.
+  - **Two new console screens**, Atlas and Fidelity, and the API grew `/latency`
+    beside a `/fidelity` that now serves the whole scorecard.
+  - **`RESULTS.md` gained three generated sections** — fidelity, latency, and the
+    two deployment questions — written by `report.py`, not by hand, because the
+    document and the console are both rendered from it.
+
+### Day 7 gate
+
+- `python -m mantis.foundry.fidelity` — discriminator **0.9994**, **0.8399** with
+  the two adjudicated axes removed; TSTR transfer ratio **0.030**; correlation
+  RMS **0.076**. Writes `data/generated/fidelity.json`.
+- `python scripts/latency_bench.py` — end-to-end **p50 117 ms / p95 153 ms /
+  p99 171 ms**, **over** the 50 ms budget; the same stages cost **0.68 ms/row**
+  in batch; the two stages that genuinely cannot be batched cost **1.02 ms p99
+  together**.
+- 287 tests, ruff clean. `python scripts/deploy_hf.py --check` green.
+
+### Day 7 findings
+
+- **The discriminator caught a bug in the fidelity measurement itself, which is
+  the best possible argument for having one.** The first shape space standardised
+  the trailing velocity counts on each panel's own mean and spread. Discriminator
+  AUC came back **1.000**. The counts are discrete and overwhelmingly zero — 87.6%
+  here, 83.4% in the reference — and standardising maps that *shared* modal atom
+  to `-0.370` on one panel and `-0.411` on the other. A single tree split
+  separates the panels perfectly while the underlying distributions
+  (0.876/0.121/0.003 against 0.834/0.142/0.021) are in fact close. **A z-score of
+  a mostly-constant discrete variable is a panel fingerprint, not a comparable
+  quantity**, and the measurement was reporting its own transform.
+  `tests/test_fidelity.py` builds two samples from the *same* distribution and
+  asserts the transform would have separated them, so the lesson is executable.
+  Replaced by `gap_ratio_log` (each cardholder against their own median gap) and
+  `burst_1h`. `customer_merchant_share` was **removed rather than fixed**: its
+  floor *is* the history length, so no centring recovers a comparable quantity.
+- **A row sample of the reference panel silently destroys every velocity
+  feature.** The first loader took 200k rows uniformly out of 1.85M, which
+  deflates every trailing count and inter-arrival gap by roughly ten. The panel is
+  now cut to a **contiguous 90-day window**, matching the synthetic span, so each
+  retained cardholder's history is intact and the two panels cover the same number
+  of days. Same class of error as the Day 5 bindings bug: a transformation that
+  cannot fail is a transformation that cannot tell you it fired.
+- **On both axes where the discriminator separates the panels, *we* are the more
+  realistic side — and that claim is only allowed because it carries a third
+  measurement.** Sparkov's hour-of-day curve is a two-level step (peak/trough
+  **1.6x**; ours 22.5x) and its 693 merchants are close to uniformly popular (top
+  10% carry **14.6%** against the 10% uniformity gives; ours carry 66.0%). Real
+  retail has a diurnal curve and real acceptance estates are Zipf, so the
+  reference is the side that departs from the domain structure.
+  `adjudicate.py` enforces the rule that makes this honest rather than
+  self-serving: **a divergence may be attributed to the reference only when a
+  third quantity, independent of both panels and stated in advance, says so.**
+  Both discriminator numbers are reported, always, because the ablation is a
+  judgement a reader must be able to reject.
+- **TSTR is 0.030 and that is not a fidelity failure — the gain tables say why.**
+  A detector trained on the reference spends **57.6%** of its gain on
+  `log_amount_z`; one trained on ours spends **35.8%** on `merchant_rank_pct`.
+  Sparkov's fraud is an *amount* anomaly; our classic-rail attacks were built so
+  that no single raw column separates them above 0.95 AUC. TRTS confirms the
+  symmetry — a real-trained model scores **ROC 0.495** on ours, which is chance.
+  So TSTR here measures *whether the two datasets' fraud is the same phenomenon*,
+  and it is not, by construction. Do not let the writeup read it as "the synthetic
+  data is unrealistic"; the marginal and discriminator sections are what speak to
+  that.
+- **The latency budget is missed, and the miss is in the calling convention.**
+  p99 **171 ms** against a 50 ms budget. But `entity` costs **47 ms** on a one-row
+  frame and **0.129 ms/row** in batch — a factor of **364** — because
+  `Series.map(dict)` materialises the lookup table into an index on *every call*,
+  so a fourteen-feature block pays that cost fourteen times to look up fourteen
+  values. Every batchable stage shows 200–360x. The two stages that genuinely
+  cannot be batched, because they must read state before folding the event in, are
+  the two the architecture was designed around: **velocity 0.660 ms p99 + graph
+  0.357 ms p99 = 1.02 ms**. The fix is a plain dict lookup on the single-event
+  path and it is **not applied** — the feature builder is shared with the offline
+  pass behind every pinned number in RESULTS.md. Report both sentences: the
+  implementation misses the budget, and the models are not why.
+- **Fusion consumes L3's score, not its decision, and that is what makes the OOD
+  result survivable.** Every layer gets three columns — percentile against
+  legitimate, standardised raw score, and a "had an opinion" indicator — and no
+  threshold is applied before fusion. Since L3's threshold does **not** transfer
+  (100% recall and 90% FP on hand-authored controls), a fusion consuming a
+  thresholded L3 vote would inherit that failure whole. Consuming the score means
+  the stacker sees the *ordering*, which does transfer (ROC 0.999 → 0.811), and
+  the fitted weights show it doing exactly that: **-0.943** on L3's percentile,
+  **+0.353** on its standardised raw score. The general form is worth keeping: **a
+  layer whose ordering transfers and whose calibration does not is still useful,
+  provided nothing downstream consumes its threshold.**
+
 ### Day 5 findings
 
 - **The bindings bug that would have cost L3 four fifths of its recall.**
@@ -547,8 +661,12 @@ rushed: widen `f6_39_shell_merchant._DECLARED_MCCS`, and soften F6-40's
 round-number snapping. Both re-roll pinned numbers, which is why they are Day 7
 scorecard items and not Day 5 edits.
 
-- **Next up**: the fidelity scorecard (`foundry/fidelity/`), then the live
-  console. Do not start these before the day they are scheduled.
+- **Next up**: nothing is scheduled. The three artifacts exist. Outstanding
+  items, all recorded rather than rushed: widen
+  `f6_39_shell_merchant._DECLARED_MCCS`, soften F6-40's round-number
+  snapping, make `decline_amount_tilt` mean-preserving per channel, and the
+  single-event dict lookup that would take the latency p99 under budget.
+  Every one of them re-rolls a pinned number, which is why none was done.
 
 ### The zero-day answer, reframed (Day 5) — READ THIS BEFORE WRITING ANY CLAIM
 

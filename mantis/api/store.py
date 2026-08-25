@@ -38,6 +38,7 @@ ARENA_JSON: Final[Path] = GENERATED_DIR / "arena.json"
 FEED_JSON: Final[Path] = GENERATED_DIR / "console_feed.json"
 OOD_JSON: Final[Path] = GENERATED_DIR / "l3_ood.json"
 FIDELITY_JSON: Final[Path] = GENERATED_DIR / "fidelity.json"
+LATENCY_JSON: Final[Path] = GENERATED_DIR / "latency.json"
 POPULATION_MANIFEST: Final[Path] = GENERATED_DIR / "population.manifest.json"
 
 
@@ -76,6 +77,7 @@ class Store:
     feed: dict[str, Any] | None = None
     ood: dict[str, Any] | None = None
     fidelity: dict[str, Any] | None = None
+    latency: dict[str, Any] | None = None
     population: dict[str, Any] | None = None
     headline: dict[str, Any] = field(default_factory=dict)
 
@@ -97,6 +99,7 @@ class Store:
         self.feed = _read_json(FEED_JSON)
         self.ood = _read_json(OOD_JSON)
         self.fidelity = _read_json(FIDELITY_JSON)
+        self.latency = _read_json(LATENCY_JSON)
         self.population = _read_json(POPULATION_MANIFEST)
         self.headline = self._build_headline()
         return self
@@ -201,7 +204,8 @@ def main() -> None:
         ("arena.json", STORE.arena is not None, "make loop"),
         ("console_feed.json", STORE.feed is not None, "make feed"),
         ("l3_ood.json", STORE.ood is not None, "make ood"),
-        ("fidelity.json", STORE.fidelity is not None, "Day 7"),
+        ("fidelity.json", STORE.fidelity is not None, "make fidelity"),
+        ("latency.json", STORE.latency is not None, "make latency"),
     ):
         mark = "ok     " if ok else "MISSING"
         print(f"  {label:<20} {mark}  {'' if ok else '-> ' + hint}")

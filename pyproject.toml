@@ -39,6 +39,24 @@ dev = [
     "ruff>=0.4",
 ]
 
+# The deployed console's dependency set, and it is deliberately tiny.
+#
+# `mantis/api/` runs no model inside a request — every score, metric and
+# attribution is read off a committed artefact — so the container needs
+# neither LightGBM nor scikit-learn nor matplotlib. Verified rather than
+# assumed: importing `mantis.api.site` loads none of pandas, numpy, sklearn,
+# scipy, lightgbm, shap, matplotlib, networkx or pyarrow. Installing this
+# instead of the full set takes the image from ~1.5 GB to ~200 MB and the cold
+# build from minutes to seconds, which on a free container host is the
+# difference between a judge seeing the console and a judge seeing a spinner.
+serve = [
+    "pydantic>=2.7",
+    "pyyaml>=6.0",
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "sse-starlette>=2.0",
+]
+
 [tool.setuptools.packages.find]
 include = ["mantis*"]
 
@@ -68,6 +86,7 @@ select = ["E", "F", "I", "B", "UP", "N", "SIM", "RUF"]
 "mantis/defense/fusion/*" = ["N803", "N806"]
 "mantis/defense/explain/*" = ["N803", "N806"]
 "mantis/loop/*" = ["N803", "N806"]
+"mantis/foundry/fidelity/*" = ["N803", "N806"]
 "scripts/*" = ["N803", "N806"]
 "mantis/defense/experiment.py" = ["N803", "N806"]
 

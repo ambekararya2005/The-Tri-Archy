@@ -685,3 +685,336 @@ table.data tr:last-child td {
     opacity: 1;
   }
 }
+
+/* ==========================================================================
+   Atlas and fidelity screens.
+
+   Both are reading surfaces rather than instruments: no stream, no animation,
+   long prose blocks beside dense tables. The rules below therefore optimise for
+   scanning - a fixed monospace column for every number, a badge vocabulary that
+   is consistent between the two screens, and generous line height in `.note`,
+   which on these screens carries the argument rather than a footnote.
+   ========================================================================== */
+
+/* A stat row. `auto-fit` rather than a fixed count so three headline numbers and
+   four both look deliberate instead of one wrapping awkwardly. */
+.rgrid.stats {
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+}
+
+.kv > span:first-child {
+  color: var(--ink-faint);
+}
+
+.kv.big-kv {
+  grid-template-columns: 1fr;
+  gap: 4px;
+  padding: 12px 14px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.kv.big-kv > span:first-child {
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.kv.big-kv > span:last-child {
+  font-size: 26px;
+  font-weight: 600;
+  color: var(--ink);
+  letter-spacing: -0.02em;
+}
+
+/* ------------------------------------------------------------------ atlas -- */
+
+.fam-grid {
+  display: grid;
+  gap: 12px;
+}
+
+.fam-top {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 5px;
+}
+
+.fam-top strong {
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--ink);
+}
+
+/* Two stacked fills, not a stacked bar: the mapped total is the track and the
+   implemented count is drawn over it, so the eye reads "how much of this family
+   is real code" rather than having to subtract. */
+.fam-track {
+  position: relative;
+  height: 9px;
+  background: var(--panel-2);
+  border-radius: 5px;
+  overflow: hidden;
+}
+
+.fam-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: 5px;
+}
+
+.fam-fill.mapped {
+  background: var(--line-bright);
+}
+
+.fam-fill.impl {
+  background: var(--blue);
+}
+
+.fam-nums {
+  margin-top: 4px;
+  font-size: 11.5px;
+}
+
+.fam-nums .impl-n {
+  color: var(--blue);
+  font-weight: 600;
+}
+
+.fam-nums .holdout {
+  margin-left: 10px;
+  color: var(--red);
+  font-size: 10px;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  gap: 10px;
+}
+
+.atlas-card {
+  text-align: left;
+  font-family: inherit;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 11px 12px;
+  cursor: pointer;
+  color: var(--ink);
+  display: grid;
+  gap: 7px;
+}
+
+.atlas-card:hover {
+  border-color: var(--blue-dim);
+}
+
+.atlas-card.found {
+  border-color: var(--red-dim);
+}
+
+.ac-top,
+.ac-foot {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  justify-content: space-between;
+}
+
+.ac-foot {
+  justify-content: flex-start;
+}
+
+.card-id {
+  font-size: 11px;
+  color: var(--ink-faint);
+  letter-spacing: 0.04em;
+}
+
+.ac-name {
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+/* Badges. `.badge` is defined above for the decision vocabulary and centres its
+   text at full width; these are inline tags, so the padding is reset. */
+.badge.impl,
+.badge.mapped,
+.badge.rail-b,
+.badge.layer-b,
+.badge.found-b,
+.badge.ref-b,
+.badge.syn-b {
+  padding: 3px 7px;
+  width: auto;
+  display: inline-block;
+}
+
+.badge.impl {
+  background: var(--blue);
+}
+
+.badge.mapped {
+  background: var(--line-bright);
+  color: var(--ink-dim);
+}
+
+.badge.rail-b {
+  background: #1c2c3a;
+  color: var(--ink-dim);
+}
+
+.badge.layer-b {
+  background: #0a2730;
+  color: var(--blue);
+}
+
+.badge.found-b,
+.badge.syn-b {
+  background: var(--red);
+}
+
+.badge.ref-b {
+  background: var(--blue-dim);
+  color: #dff6fb;
+}
+
+/* The card drawer. A dialog rather than a route, because the atlas is one screen
+   and a deep link into a card is not something a four-minute demo needs. */
+.drawer-wrap {
+  position: fixed;
+  inset: 0;
+  background: rgba(3, 5, 8, 0.72);
+  display: flex;
+  justify-content: flex-end;
+  z-index: 40;
+}
+
+.drawer {
+  width: min(620px, 100%);
+  height: 100%;
+  overflow-y: auto;
+  background: var(--panel);
+  border-left: 1px solid var(--line-bright);
+  padding: 20px 22px 40px;
+}
+
+.drawer-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+
+.drawer-head h3 {
+  margin: 3px 0 0;
+  font-size: 18px;
+  line-height: 1.3;
+}
+
+.drawer-body h4 {
+  margin: 20px 0 8px;
+  font-size: 11px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+
+.drawer-body .desc {
+  font-size: 13.5px;
+  line-height: 1.65;
+  color: var(--ink-dim);
+  margin: 12px 0 16px;
+}
+
+.drawer-body ul {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: var(--ink-dim);
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+/* --------------------------------------------------------------- tables --- */
+
+table.sig {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+table.sig th {
+  text-align: left;
+  font-weight: 600;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--line);
+}
+
+table.sig td {
+  padding: 7px 8px;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+  line-height: 1.5;
+  color: var(--ink-dim);
+}
+
+table.sig th.r,
+table.sig td.r {
+  text-align: right;
+}
+
+table.sig.levels td:first-child {
+  color: var(--ink);
+}
+
+/* ------------------------------------------------------------- fidelity --- */
+
+/* An adjudication, or a known divergence. Same shape for both: a claim, the
+   measurement that supports it, and why it stands. */
+.adj {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin-bottom: 10px;
+  background: var(--panel-2);
+}
+
+.adj-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  justify-content: space-between;
+  margin-bottom: 9px;
+}
+
+.adj-head .num {
+  font-size: 13px;
+  color: var(--ink);
+}
+
+.adj .kv {
+  grid-template-columns: 92px minmax(0, 1fr);
+  margin-bottom: 3px;
+}
+
+.adj p.hint {
+  margin: 9px 0 0;
+  line-height: 1.6;
+  font-size: 11.5px;
+}

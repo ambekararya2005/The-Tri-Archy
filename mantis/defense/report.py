@@ -32,6 +32,16 @@ __all__ = ["write_results"]
 #: the same document as the firewall's, rather than in a second file nobody opens.
 ARENA_JSON = GENERATED_DIR / "arena.json"
 
+#: Written by ``python -m mantis.foundry.fidelity`` and ``scripts/latency_bench.py``.
+#: Same reason as the arena: criterion 2 and half of criterion 5 are measured by
+#: code that is not the firewall, and a submission where those numbers live in
+#: three separate files is a submission where one of them is stale.
+#:
+#: Both sections degrade to a single honest line when their artefact is absent.
+#: Neither substitutes a number for a missing measurement.
+FIDELITY_JSON = GENERATED_DIR / "fidelity.json"
+LATENCY_JSON = GENERATED_DIR / "latency.json"
+
 #: One line per layer, so the table's prose cannot drift from the architecture.
 _LAYER_BLURB: dict[str, str] = {
     "L1": "GBDT, supervised, time-split, isotonic-calibrated",
@@ -366,12 +376,22 @@ def write_results(result, pool: pd.DataFrame, path: Path) -> None:
         w(f"| `{row.feature}` | {row.share:.2%} |")
     w("")
 
+    # ---------------------------------------------------------------- fidelity
+    w(_fidelity_section())
+
+    # ---------------------------------------------------------------- latency
+    w(_latency_section())
+
+    # ---------------------------------------------------------------- feasibility
+    w(_feasibility_section())
+
     # ---------------------------------------------------------------- caveats
     w("## What this does not claim")
     w("")
     w("- **This is not real-world performance.** It is measured on synthetic data whose attacks "
-      "we wrote. The fidelity scorecard (Day 7) is the argument that the background is "
-      "realistic; nothing here substitutes for it.")
+      "we wrote. The fidelity scorecard above is the argument that the background is "
+      "realistic, and it is a qualified argument: read its discriminator row before reading "
+      "any recall here.")
     w("- **F5 is absent from every table.** It is the zero-day holdout family and has no "
       "implemented injector, so it is not in the data and cannot be scored. The "
       "leave-one-family-out columns and the loop experiment are the closest available stand-ins.")
@@ -383,9 +403,9 @@ def write_results(result, pool: pd.DataFrame, path: Path) -> None:
       "builder, alongside the label and post-hoc columns. Feeding them in would raise F4-27's "
       "recall substantially and mean nothing — an issuer cannot decline a transaction because it "
       "was declined.")
-    w("- **Latency is not measured here.** The feature pass is 0.052 ms/row and the graph pass "
-      "0.021 ms/row, but an end-to-end p99 for the whole firewall is a Day 7 number and is not "
-      "quoted before it is measured.")
+    w("- **The measured latency is over budget, and the section above says so.** What is *not* "
+      "claimed is the reverse: no number here is an estimate of what a rewritten scoring path "
+      "would cost. The p99 is what this implementation does today.")
     w("")
 
     path.write_text("\n".join(out) + "\n", encoding="utf-8")
@@ -842,3 +862,402 @@ def _arena_section() -> str:
             "",
         ]
     return "\n".join(lines)
+
+
+def _fidelity_section() -> str:
+    """Criterion 2's numbers, read from the scorecard rather than restated.
+
+    Absent artefact produces one honest line naming the command, not a blank
+    heading and not a placeholder number. The same rule the loop section follows.
+    """
+    if not FIDELITY_JSON.exists():
+        return (
+            "## Fidelity of the simulation\n\n"
+            "Not measured in this run. `make reference && make fidelity` writes "
+            "`data/generated/fidelity.json`, and this section is rendered from it.\n"
+        )
+    card = json.loads(FIDELITY_JSON.read_text(encoding="utf-8"))
+    if not card.get("reference", {}).get("available"):
+        return (
+            "## Fidelity of the simulation\n\n"
+            "The scorecard ran without a reference panel, so its marginal, TSTR and "
+            "discriminator sections were skipped. **Nothing is substituted for them.** "
+            "Comparing the population against its own specification is what "
+            "`scripts/drift_check.py` does; it is a different question, and reporting "
+            "it here as fidelity would be the dishonest version of this section. "
+            "Run `make reference` and re-run `make fidelity`.\n"
+        )
+
+    rows = card["marginals"]["rows"]
+    tstr = card["tstr"]
+    disc = card["discriminator"]
+    ablated = card["discriminator_ablated"]
+    syn = card["synthetic"]["levels"]
+    ref = card["reference"]["levels"]
+
+    lines = [
+        "## Fidelity of the simulation",
+        "",
+        "Every detection figure above is measured on data this project generated, which makes "
+        "all of them conditional. This is the measurement of what the condition is worth, and "
+        "it is deliberately unflattering: a scorecard where everything came out green would be "
+        "evidence that it was measuring the wrong things.",
+        "",
+        "| | |",
+        "|---|---|",
+        f"| reference panel | {card['reference']['provenance']} |",
+        f"| population calibration | `{card['calibration']['source']}` |",
+        f"| discriminator, all shape features | **{disc['auc']:.4f}** (target 0.5) |",
+        f"| discriminator, adjudicated axes removed | **{ablated['auc']:.4f}** |",
+        f"| TSTR transfer ratio | {tstr['transfer_ratio']:.3f} |",
+        f"| correlation-matrix RMS error | "
+        f"{card['marginals']['correlation']['rms_off_diagonal']:.3f} |",
+        "",
+        "### Nothing is compared raw, and that is the first thing to check",
+        "",
+        "A rupee population with an agentic rail cannot be compared to a dollar panel without "
+        "one on absolute amount, category, geography, BIN, 3-D Secure or channel. Doing it "
+        "would produce a large number that measures the difference between two countries. Both "
+        "sides are projected into a **dimensionless shape space** first — the diurnal curve, "
+        "within-category amount dispersion, burstiness against each cardholder's own rhythm, "
+        "and merchant rank-frequency — and every distance below lives there.",
+        "",
+        "The agentic rail is excluded from the synthetic side for the sharpest version of the "
+        "same reason: **the reference panel has no agentic transactions, because no panel "
+        "does.** That absence is the premise of the whole project, and it is also the limit of "
+        "what this section can claim.",
+        "",
+        "The two panels differ in *level* as well as in shape, and the levels are reported with "
+        "**no distance attached** — a ratio between two panels' cardholder velocity is a fact "
+        "about how each was composed:",
+        "",
+        "| level | synthetic | reference | ratio |",
+        "|---|---|---|---|",
+    ]
+    for key, label, digits in (
+        ("customers", "cardholders", 0),
+        ("merchants", "merchants", 0),
+        ("txn_per_customer_per_day", "txn / cardholder / day", 3),
+        ("top_1pct_merchant_share", "top 1% merchant share", 3),
+    ):
+        a, b = syn.get(key), ref.get(key)
+        ratio = a / b if a is not None and b else float("nan")
+        fmt = f"{{:,.{digits}f}}"
+        lines.append(
+            f"| {label} | {fmt.format(a)} | {fmt.format(b)} | {ratio:.2f}x |"
+        )
+
+    lines += [
+        "",
+        "### Marginals, each against its own sampling-noise band",
+        "",
+        "No distance here is compared against a threshold somebody made up. Every band is "
+        "bootstrapped from the reference distribution itself at these sample sizes, so a ratio "
+        "of 1.0 means *indistinguishable from sampling noise* and the ratio is the number to "
+        "read. Sorted worst first.",
+        "",
+        "| feature | metric | distance | noise band | x band |",
+        "|---|---|---|---|---|",
+    ]
+    for row in rows:
+        lines.append(
+            f"| `{row['feature']}` | {row['metric']} | {row['distance']:.4f} | "
+            f"{row['band']:.4f} | {row['ratio']:,.1f} |"
+        )
+
+    correlation = card["marginals"]["correlation"]
+    worst = correlation["worst_pairs"][0]
+    lines += [
+        "",
+        "Marginals alone are not enough: a generator can match every one of them and still "
+        "draw each column independently. The Spearman correlation matrices differ by an RMS of "
+        f"**{correlation['rms_off_diagonal']:.3f}** off the diagonal (Frobenius "
+        f"{correlation['frobenius']:.3f} over {correlation['n_features']} features). The worst "
+        f"pair is `{worst['pair']}`: {worst['synthetic']:+.3f} here against "
+        f"{worst['real']:+.3f} in the reference.",
+        "",
+        "### TSTR — and it does not transfer",
+        "",
+        "| model | trained on | tested on | AUC-PR | ROC | lift over baseline |",
+        "|---|---|---|---|---|---|",
+        f"| **TRTR** | real | real | {tstr['trtr']['auc_pr']:.4f} | "
+        f"{tstr['trtr']['roc_auc']:.4f} | {tstr['trtr_lift']:.0f}x |",
+        f"| **TSTR** | synthetic | real | {tstr['tstr']['auc_pr']:.4f} | "
+        f"{tstr['tstr']['roc_auc']:.4f} | {tstr['tstr_lift']:.1f}x |",
+        f"| **TRTS** | real | synthetic | {tstr['trts']['auc_pr']:.4f} | "
+        f"{tstr['trts']['roc_auc']:.4f} | |",
+        "",
+        f"The transfer ratio is **{tstr['transfer_ratio']:.3f}**, and stating that as a failure "
+        "of realism would be the easy reading and the wrong one. The gain tables say what "
+        "actually happened:",
+        "",
+    ]
+    learned = tstr.get("what_each_learned")
+    if learned:
+        lines += [
+            "| feature | gain, trained on real | gain, trained on synthetic |",
+            "|---|---|---|",
+        ]
+        synth_gain = {r["feature"]: r["gain_share"] for r in learned["tstr"]}
+        for row in learned["trtr"][:5]:
+            lines.append(
+                f"| `{row['feature']}` | {row['gain_share']:.1%} | "
+                f"{synth_gain.get(row['feature'], 0.0):.1%} |"
+            )
+        top_real = learned["trtr"][0]
+        top_syn = learned["tstr"][0]
+        lines += [
+            "",
+            f"A detector trained on the reference panel spends {top_real['gain_share']:.0%} of "
+            f"its gain on `{top_real['feature']}`. One trained on ours spends "
+            f"{top_syn['gain_share']:.0%} on `{top_syn['feature']}`. **The two panels' fraud "
+            "are different phenomena living in different features** — Sparkov's fraud is an "
+            "amount anomaly, and this project's classic-rail attacks were built specifically so "
+            "that no single raw column separates them above 0.95 AUC. TRTS confirms the "
+            f"symmetry: a model trained on real data scores ROC {tstr['trts']['roc_auc']:.3f} "
+            "on ours, which is chance.",
+            "",
+            "So the honest reading is that TSTR measures *whether the two datasets' fraud is the "
+            "same phenomenon*, and here it is not, by construction. It is **not** evidence that "
+            "the background population is unrealistic — the marginal and discriminator sections "
+            "are what speak to that.",
+            "",
+            tstr["caveat"],
+            "",
+        ]
+
+    lines += [
+        "### The discriminator — the only test that sees interactions",
+        "",
+        "Label the synthetic rows 1, the real rows 0, and fit a gradient-boosted tree on the "
+        "shape features, scored out of fold on balanced subsamples. **The target is 0.5**: here, "
+        "higher is worse.",
+        "",
+        f"Result: **{disc['auc']:.4f}** ({disc['separability']:.1%} separable). {disc['reading']}",
+        "",
+        "| feature | separable alone (AUC) | gain share |",
+        "|---|---|---|",
+    ]
+    for row in disc["per_feature"]:
+        lines.append(f"| `{row['feature']}` | {row['alone_auc']:.4f} | {row['gain_share']:.1%} |")
+
+    adjudications = card.get("adjudications", [])
+    if adjudications:
+        lines += [
+            "",
+            "#### Which side is the anomalous one?",
+            "",
+            "A discriminator says a difference exists. It does not say which panel is wrong, and "
+            "the temptation three days before a submission is to assume it is the reference. So "
+            "the rule is that **an adjudication must carry a measurement**: a divergence is "
+            "attributed to the reference panel only when a third quantity, independent of both "
+            "and agreed before either dataset existed, says the reference is the side that "
+            "departs from it.",
+            "",
+            "| feature | test | synthetic | reference | verdict |",
+            "|---|---|---|---|---|",
+        ]
+        for row in adjudications:
+            lines.append(
+                f"| `{row['feature']}` | {row['third_quantity']} | {row['synthetic']} | "
+                f"{row['reference']} | **{row['verdict'].lower()}** |"
+            )
+        lines += [
+            "",
+            "Sparkov's hour-of-day curve is a two-level step rather than a diurnal curve, and its "
+            "693 merchants are close to uniformly popular. Neither is a defect in that dataset "
+            "for its own purpose — it exists to benchmark fraud classifiers, and a flat time "
+            "curve does not hurt that — but it does mean those two axes cannot measure this "
+            "project's fidelity.",
+            "",
+            f"With them removed the discriminator falls to **{ablated['auc']:.4f}** "
+            f"({ablated['separability']:.1%} separable). **Both numbers are quoted because the "
+            "ablation is a judgement**: the full discriminator is the measurement, the ablated "
+            "one is the measurement after a judgement a reader is free to reject. And "
+            f"{ablated['auc']:.2f} is still high — the remaining features are individually close "
+            "(every one under 0.54 alone) and the separation is in their *joint* structure, "
+            "which is the same thing the correlation-matrix distance measures and is the "
+            "foundry's most substantial outstanding item.",
+            "",
+        ]
+
+    known = card.get("known_divergences", [])
+    if known:
+        lines += [
+            "### Divergences we name ourselves",
+            "",
+            "Found before this scorecard existed, measured, and deliberately left in place. A "
+            "scorecard that names its own divergences is worth more than one where a judge finds "
+            "them.",
+            "",
+        ]
+        for row in known:
+            lines += [
+                f"**{row['name']}** — {row['measured']}.",
+                "",
+                f"{row['cause']} {row['why_not_fixed']}",
+                "",
+            ]
+
+    return "\n".join(lines)
+
+
+def _latency_section() -> str:
+    """Criterion 5's second number, reported as measured rather than as targeted."""
+    if not LATENCY_JSON.exists():
+        return (
+            "## Scoring latency\n\n"
+            "Not measured in this run. `make latency` writes "
+            "`data/generated/latency.json`, and this section is rendered from it. "
+            "**No number is substituted for it.**\n"
+        )
+    payload = json.loads(LATENCY_JSON.read_text(encoding="utf-8"))
+    end = payload["end_to_end_ms"]
+    stages = payload["stages_ms"]
+    batch = payload.get("batch_per_row_ms", {})
+    budget = payload["budget_ms"]
+    verdict = "**within**" if payload["within_budget"] else "**over**"
+
+    heaviest = max(stages, key=lambda name: stages[name]["mean"])
+    factor = stages[heaviest]["mean"] / batch[heaviest] if batch.get(heaviest) else float("nan")
+    streaming = stages["velocity"]["p99"] + stages["graph"]["p99"]
+
+    lines = [
+        "## Scoring latency",
+        "",
+        f"Measured **one event at a time** against state warmed on "
+        f"{payload['warm_events']:,} training events — not a batch divided by its row count, "
+        "which is the usual way a latency claim turns out to be false in production. "
+        f"{payload['n_events']:,} events timed.",
+        "",
+        "| | p50 | p95 | p99 | max |",
+        "|---|---|---|---|---|",
+        f"| end to end | {end['p50']:.1f} ms | {end['p95']:.1f} ms | **{end['p99']:.1f} ms** | "
+        f"{end['max']:.1f} ms |",
+        "",
+        f"Against a **{budget:.0f} ms** authorisation-host budget, that is {verdict} budget.",
+        "",
+        "| stage | mean | p99 | share | per row in batch | overhead |",
+        "|---|---|---|---|---|---|",
+    ]
+    for name in stages:
+        row = stages[name]
+        per_row = batch.get(name, float("nan"))
+        share = row["mean"] / end["mean"] if end["mean"] else 0.0
+        ratio = row["mean"] / per_row if per_row else float("nan")
+        overhead = "—" if abs(ratio - 1.0) < 0.01 else f"{ratio:,.0f}x"
+        lines.append(
+            f"| `{name}` | {row['mean']:.3f} ms | {row['p99']:.3f} ms | {share:.1%} | "
+            f"{per_row:.4f} ms | {overhead} |"
+        )
+
+    lines += [
+        "",
+        "### Read the last two columns before the p99",
+        "",
+        f"Most of the clock goes to `{heaviest}`, which costs {stages[heaviest]['mean']:.1f} ms "
+        f"called with one row and {batch[heaviest]:.4f} ms per row called with many — a factor "
+        f"of **{factor:,.0f}**. That is per-call overhead in pandas and scikit-learn, not model "
+        "work: `Series.map(dict)` materialises the lookup table into an index on every call, so "
+        "a feature block pays that cost once per feature to look up one value.",
+        "",
+        "**The fix is named and not applied.** A plain dictionary lookup on the single-event "
+        "path removes it, and the feature builder is shared with the offline pass behind every "
+        "pinned number in this document. Three days out, this project records the finding "
+        "rather than re-rolls the tables for it.",
+        "",
+        "The two stages that genuinely **cannot** be batched — the stateful stores, which must "
+        "read state before folding the event in, and which are therefore the same code online "
+        f"and offline — cost `velocity` {stages['velocity']['p99']:.3f} ms p99 and `graph` "
+        f"{stages['graph']['p99']:.3f} ms p99, **{streaming:.2f} ms together**. Those are the "
+        "numbers that would survive a rewritten scoring path, and they are the ones the "
+        "architecture was designed around: one forward pass, `bisect` and prefix sums per "
+        "window, union-find over the identity graph, bounded memory by eviction.",
+        "",
+        f"The honest headline is therefore both sentences: **the current implementation misses a "
+        f"50 ms budget at p99 ({end['p99']:.0f} ms), and the miss is in the calling convention "
+        "rather than in the models.** Quoting only the second would be an estimate dressed as a "
+        "measurement; quoting only the first would invite the conclusion that a five-layer "
+        "firewall cannot run inline, which this measurement does not support.",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def _feasibility_section() -> str:
+    """Two deployment questions the tables above raise but do not answer.
+
+    Static prose rather than generated numbers, because both are statements about
+    the *architecture* and neither moves with a retrain. They live in the
+    generated document rather than in a hand-edited one for the reason the module
+    docstring gives: there is one place a reader looks, and it cannot go stale
+    against a file nobody remembers to update.
+    """
+    return "\n".join(
+        [
+            "## Two things a deployment would need to know",
+            "",
+            "### Fusion consumes L3's score, not L3's decision",
+            "",
+            "This matters more than it sounds like it does, and the L3 out-of-distribution "
+            "result above is why.",
+            "",
+            "`FusionModel` gives every layer **three columns**: its percentile against the "
+            "legitimate score distribution, its raw score standardised on the fusion window's "
+            "legitimate rows, and — where the layer is sometimes silent — an indicator for "
+            "whether it had an opinion at all. No threshold is applied to any layer before "
+            "fusion. L3's page threshold is used for *reporting* L3 as a standalone layer and "
+            "for nothing else.",
+            "",
+            "That is the right way round, and it is what makes the out-of-distribution finding "
+            "survivable. L3's threshold **does not transfer** to text unlike its training "
+            "corpus: pointed at hand-authored payloads it fires on 100% of the injections and "
+            "on 90% of the *clean* controls written in the same registers. A fused score that "
+            "consumed L3's thresholded decision would inherit that failure directly — every "
+            "procedural-sounding page would arrive at fusion as a hard vote for fraud, on a "
+            "layer whose calibration had silently stopped being valid.",
+            "",
+            "Consuming the score instead means the stacker sees L3's *ordering*, which is what "
+            "survived the transfer: ROC falls 0.999 → 0.811 rather than collapsing. The "
+            "percentile column is re-derived from the deployment's own legitimate traffic every "
+            "time fusion is fitted, so a shift in L3's absolute scale is re-absorbed at the next "
+            "refit rather than becoming a permanent bias. And the fitted weight is the check on "
+            "the whole arrangement: on this data the stacker put **-0.943** on L3's percentile "
+            "and **+0.353** on its standardised raw score, which is the model saying it trusts "
+            "the layer's ordering while discounting the calibration that produced the "
+            "percentile. That is a discount a decision-consuming fusion could not have applied.",
+            "",
+            "### What the non-transferring threshold means for deploying on novel text",
+            "",
+            "Stated plainly, because it is the largest single caveat on the agentic side of this "
+            "architecture: **L3 as calibrated here cannot be pointed at the open web.** It is a "
+            "classifier fitted on one 7B model's output through one set of prompt templates in "
+            "one register, and its decision boundary is a property of that corpus rather than of "
+            "injected text in general.",
+            "",
+            "Three consequences for a deployment, in the order they would bite:",
+            "",
+            "1. **Fit the page threshold on the traffic it will see, not on the corpus it was "
+            "trained on.** The benign side of that calibration set is the part that matters and "
+            "the part that is easy to get for free — it is the pages agents read on ordinary, "
+            "approved authorisations, which an issuer accumulates without labelling anything. "
+            "The 90% false-positive rate on hand-authored controls is what happens when this "
+            "step is skipped.",
+            "2. **Do not promote L3 to a standalone decision.** Its recall is real on two of "
+            "fifteen cards and its ordering transfers; its calibration does not. It belongs "
+            "behind fusion, where a fitted weight can discount it, and behind L0, where the "
+            "protocol invariants need no calibration at all.",
+            "3. **A bag of words is the wrong long-term model, and the failure mode says why.** "
+            "It keys on lexical markers of instruction — *do not*, *skip*, *without* — which is "
+            "precisely why prose that merely sounds procedural trips it. The 1.000 recall on "
+            "F1-01 and F1-03 is a true statement about this corpus and is not a claim about "
+            "text in general.",
+            "",
+            "The general form of this is worth keeping, because it is not specific to L3: **a "
+            "layer whose ordering transfers and whose calibration does not is still useful, "
+            "provided nothing downstream consumes its threshold.** The architecture already "
+            "satisfies that condition; it was not designed to, and the out-of-distribution probe "
+            "is what turned an accident into a checked property.",
+            "",
+        ]
+    )

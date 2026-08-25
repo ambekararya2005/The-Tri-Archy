@@ -149,17 +149,65 @@ class ArenaResponse(BaseModel):
 
 # ------------------------------------------------------------------ fidelity --
 class FidelityResponse(BaseModel):
-    """The fidelity scorecard.
+    """The fidelity scorecard - criterion 2's artefact, served whole.
 
-    Day 7's deliverable. The endpoint exists now and reports ``available: false``
-    rather than 404-ing, because a console that renders "not measured yet" is
-    telling the truth, and one that 404s looks broken.
+    Written by ``python -m mantis.foundry.fidelity`` and read off disk here.
+    ``available: false`` when it has never been generated, because a console that
+    renders "not measured yet" is telling the truth and one that 404s looks
+    broken.
+
+    The sections are passed through rather than reshaped. Every one of them is
+    already the shape a reader needs - the scorecard's CLI and this endpoint
+    print the same dict - and adding a second schema here would be one more place
+    for the numbers to drift from what the code produced.
     """
 
     available: bool
     note: str
-    metrics: list[dict[str, Any]] = Field(default_factory=list)
+    generated: str = ""
+    schema_version: str = ""
+
+    #: Which calibration path the population used: fitted, or committed priors.
+    #: First, because every number below is conditional on it.
+    calibration: dict[str, Any] = Field(default_factory=dict)
+    #: The external panel, its provenance line, and the level ratios that are
+    #: reported *without* a distance attached. Absent when no panel was present.
+    reference: dict[str, Any] = Field(default_factory=dict)
+    synthetic: dict[str, Any] = Field(default_factory=dict)
+
+    headline: dict[str, Any] = Field(default_factory=dict)
+    marginals: dict[str, Any] = Field(default_factory=dict)
+    tstr: dict[str, Any] = Field(default_factory=dict)
+    discriminator: dict[str, Any] = Field(default_factory=dict)
+    #: The same discriminator with the adjudicated axes removed. Served beside
+    #: the full one, never instead of it: the ablation is a judgement, and a
+    #: reader has to be able to see both numbers to reject it.
+    discriminator_ablated: dict[str, Any] = Field(default_factory=dict)
+    adjudications: list[dict[str, Any]] = Field(default_factory=list)
+    known_divergences: list[dict[str, Any]] = Field(default_factory=list)
+
+    #: Day 1 population calibration, from the manifest. Retained for the
+    #: no-scorecard case, where it is the only measured thing available.
     population: dict[str, Any] = Field(default_factory=dict)
+
+
+class LatencyResponse(BaseModel):
+    """Per-event scoring latency, measured one event at a time against warm state.
+
+    Criterion 5's other number. ``available: false`` until
+    ``scripts/latency_bench.py`` has been run.
+    """
+
+    available: bool
+    note: str = ""
+    generated: str = ""
+    n_events: int = 0
+    warm_events: int = 0
+    budget_ms: float = 0.0
+    within_budget: bool = False
+    headroom: float = 0.0
+    end_to_end_ms: dict[str, float] = Field(default_factory=dict)
+    stages_ms: dict[str, dict[str, float]] = Field(default_factory=dict)
 
 
 # ------------------------------------------------------------------ stream ----

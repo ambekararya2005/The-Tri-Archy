@@ -128,6 +128,93 @@ export interface ArenaResponse {
   zero_day: Record<string, number | string> | null;
 }
 
+/** One row of the fidelity scorecard's marginal table. */
+export interface MarginalRow {
+  feature: string;
+  kind: "continuous" | "categorical";
+  metric: "KS" | "JSD";
+  distance: number;
+  band: number;
+  ratio: number;
+  synthetic_median?: number;
+  real_median?: number;
+  max_level_delta?: number;
+  max_level?: string;
+}
+
+export interface FidelityResponse {
+  available: boolean;
+  note: string;
+  generated: string;
+  calibration: { source?: string; note?: string };
+  reference: {
+    available?: boolean;
+    provenance?: string;
+    note?: string;
+    levels?: Record<string, number>;
+    level_ratios?: Record<string, number>;
+  };
+  synthetic: { levels?: Record<string, number>; note?: string; events_compared?: number };
+  headline: Record<string, number | string | null>;
+  marginals: {
+    rows?: MarginalRow[];
+    correlation?: {
+      frobenius: number;
+      rms_off_diagonal: number;
+      n_features: number;
+      worst_pairs: { pair: string; synthetic: number; real: number; delta: number }[];
+    };
+  };
+  tstr: {
+    trtr?: { auc_pr: number; roc_auc: number; baseline: number };
+    tstr?: { auc_pr: number; roc_auc: number; baseline: number };
+    trts?: { auc_pr: number; roc_auc: number; baseline: number };
+    transfer_ratio?: number;
+    caveat?: string;
+    what_each_learned?: {
+      trtr: { feature: string; gain_share: number }[];
+      tstr: { feature: string; gain_share: number }[];
+    };
+  };
+  discriminator: {
+    auc?: number;
+    target?: number;
+    separability?: number;
+    reading?: string;
+    n_per_side?: number;
+    per_feature?: { feature: string; alone_auc: number; gain_share: number }[];
+  };
+  discriminator_ablated: { auc?: number; separability?: number; excluded?: string[] };
+  adjudications: {
+    feature: string;
+    third_quantity: string;
+    synthetic: string;
+    reference: string;
+    verdict: string;
+    note: string;
+  }[];
+  known_divergences: {
+    name: string;
+    measured: string;
+    cause: string;
+    why_not_fixed: string;
+  }[];
+  population: Record<string, unknown>;
+}
+
+export interface LatencyResponse {
+  available: boolean;
+  note: string;
+  generated: string;
+  n_events: number;
+  warm_events: number;
+  budget_ms: number;
+  within_budget: boolean;
+  headroom: number;
+  end_to_end_ms: Record<string, number>;
+  stages_ms: Record<string, Record<string, number>>;
+}
+
 /**
  * Where the console gets its data from.
  *
@@ -220,6 +307,54 @@ async function getJSON<T>(path: string): Promise<T> {
 export const fetchAtlas = () => getJSON<AtlasResponse>("/atlas");
 export const fetchResults = () => getJSON<ResultsResponse>("/results");
 export const fetchArena = () => getJSON<ArenaResponse>("/arena");
+export const fetchFidelity = () => getJSON<FidelityResponse>("/fidelity");
+
+/**
+ * Latency, which is allowed to be absent.
+ *
+ * `make latency` is a five-minute fit and is not part of `make submission`, so a
+ * clone can legitimately have no latency.json. Every other fetch in this file
+ * throws on a missing artefact because a missing RESULTS.md means the console is
+ * broken; here it means one panel says "not measured", which is a true statement
+ * and the one this project would rather make than invent a number.
+ */
+export const fetchLatency = async (): Promise<LatencyResponse | null> => {
+  try {
+    return await getJSON<LatencyResponse>("/latency");
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * One card in full, for the atlas drawer.
+ *
+ * `/atlas/{id}` is a route per card and a static host has no routes, so the
+ * offline path reads one frozen map of all 42 instead — loaded once, cached, and
+ * produced by the same route handler at build time.
+ */
+let frozenCards: Promise<Record<string, AtlasCardDetail>> | null = null;
+
+export async function fetchAtlasCard(id: string): Promise<AtlasCardDetail> {
+  if ((await detectMode()) === "static") {
+    frozenCards ??= getStatic<Record<string, AtlasCardDetail>>("atlas_cards.json");
+    const card = (await frozenCards)[id];
+    if (!card) throw new Error(`no atlas card ${id} in the frozen set`);
+    return card;
+  }
+  return getJSON<AtlasCardDetail>(`/atlas/${id}`);
+}
+
+export interface AtlasCardDetail extends AtlasCard {
+  actor: string;
+  genai_enabler: string;
+  description: string;
+  preconditions: string[];
+  observable_signals: { signal: string; feature: string | null; layer: string }[];
+  mitigations: string[];
+  generator: string | null;
+  references: string[];
+}
 
 export interface SimulateOptions {
   n_events?: number;

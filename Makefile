@@ -1,4 +1,4 @@
-.PHONY: help install lint fmt test atlas schema population figure dataset probe corpus features l0 firewall render loop arena derived drift slices ood feed api static web docx submission gate demo clean
+.PHONY: help install lint fmt test atlas schema population figure dataset probe corpus features l0 firewall render loop arena derived drift slices reference fidelity latency ood feed api static web docx submission deploy gate demo clean
 
 PY ?= python
 
@@ -20,6 +20,9 @@ help:
 	@echo "  render   re-write RESULTS.md from the cached run, no refit"
 	@echo "  loop     THE Day 5 gate: evasion curve + zero-day demo -> arena.json"
 	@echo "  derived  the separability probe run over the BUILT feature matrix"
+	@echo "  reference   fetch the Kaggle Sparkov panel the scorecard needs (~210 MB)"
+	@echo "  fidelity    THE Day 7 scorecard: KS/JS, TSTR, real-vs-synthetic discriminator"
+	@echo "  latency     end-to-end per-event scoring latency, p50/p95/p99"
 	@echo "  drift    every marginal vs the reference, against a sampling-noise band"
 	@echo "  slices   audit every probe_slice and print its denominator"
 	@echo "  figure   redraw the calibration figure from the existing parquet"
@@ -114,6 +117,23 @@ arena:
 derived:
 	$(PY) scripts/probe_derived.py
 
+# Day 7: the reference panel. Downloads once, ~210 MB, never committed. The
+# scorecard degrades cleanly without it, which is the state of a clean clone.
+reference:
+	$(PY) scripts/fetch_reference.py
+
+# Day 7: THE fidelity scorecard - criterion 2's artefact. Marginal KS/JS against
+# sampling-noise bands, correlation-matrix distance, TSTR, and a real-vs-synthetic
+# discriminator whose target is 0.5. Writes data/generated/fidelity.json.
+# Exits 1 (not 0) when the reference panel is absent, so a missing input is loud.
+fidelity:
+	$(PY) -m mantis.foundry.fidelity
+
+# Day 7: end-to-end scoring latency through the full fused stack, against the
+# 50 ms budget. Reports p50/p95/p99 as measured, not as targeted.
+latency:
+	$(PY) scripts/latency_bench.py
+
 # Day 6 carry-over: does L3 fire on an injection somebody else wrote? Ships
 # hand-authored payloads AND benign controls in the same registers, because the
 # recall number is uninterpretable without them. See the script's docstring.
@@ -147,6 +167,10 @@ docx:
 	$(PY) scripts/build_docx.py
 
 # The three artifacts a judge receives, rebuilt in dependency order.
+# `fidelity` is deliberately NOT a prerequisite: it needs the 210 MB Kaggle
+# panel, it exits 1 without it, and data/generated/fidelity.json is committed -
+# so a clean clone assembles the submission without a download. Re-run
+# `make reference && make fidelity` when the scorecard itself changes.
 submission: ood feed docx web
 	@echo ""
 	@echo "Submission artifacts:"

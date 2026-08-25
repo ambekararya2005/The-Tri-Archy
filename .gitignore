@@ -56,6 +56,16 @@ data/generated/*
 !data/generated/population.manifest.json
 !data/generated/dataset_v1.manifest.json
 
+# The Day 7 fidelity scorecard. Committed for the same reason arena.json is:
+# it is the artefact a scored criterion is judged on, it is small, and a
+# clone should show it without a ninety-second refit.
+!data/generated/fidelity.json
+
+# The Day 7 latency measurement. Small, and RESULTS.md renders a section
+# from it, so a clone that has never run the 3-minute bench still shows the
+# number the document quotes.
+!data/generated/latency.json
+
 # The LLM cache IS committed on purpose. A judge cloning this repo will not
 # have Ollama running, so the cache is what makes `make demo` work offline.
 # See CLAUDE.md HARD RULE 3. Do not add data/cache/ here.
@@ -69,3 +79,9 @@ data/generated/*
 .env
 *.pem
 kaggle.json
+
+# The Kaggle Sparkov reference CSVs (~500 MB). Pulled by
+# scripts/fetch_reference.py when a fidelity run needs them; never
+# committed, because HARD RULE 4 says a clean clone must not need them.
+data/reference/*.csv
+data/reference/*.zip
