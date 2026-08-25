@@ -122,3 +122,9 @@ class FeatureConfig:
     #: Domains treated as attacker infrastructure by the provenance features.
     #: Empty means the feature is computed against the fitted allow-list instead.
     trusted_domain_quantile: float = 0.98
+
+    #: Include the L4 entity-graph block (``gph_*``). On by default from Day 5:
+    #: F2 and F4 are entity-level attacks and a per-event matrix cannot see them.
+    #: The flag exists so an ablation can turn the whole layer off by name rather
+    #: than by deleting columns.
+    include_graph: bool = True

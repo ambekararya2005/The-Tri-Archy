@@ -32,6 +32,14 @@ Thumbs.db
 data/generated/*
 !data/generated/.gitkeep
 
+# ...except the arena result. arena.json is the Day 5 gate artefact -- the evasion
+# curve and the zero-day comparison -- and it is committed for exactly the reason
+# the LLM cache is: a judge cloning this repo should be able to read the curve
+# without spending thirty-five minutes regenerating it. It is a few kilobytes of
+# JSON, it is reproducible from `python -m mantis.loop` with the default seed, and
+# RESULTS.md is rendered from it.
+!data/generated/arena.json
+
 # The LLM cache IS committed on purpose. A judge cloning this repo will not
 # have Ollama running, so the cache is what makes `make demo` work offline.
 # See CLAUDE.md HARD RULE 3. Do not add data/cache/ here.

@@ -39,7 +39,7 @@ is a cut candidate.
 |---|-----------|-------------------------|------------------------------|
 | 1 | **Diversity of attacks** | `mantis/atlas/` — 42 cards across families F1–F6, each with `observable_signals` wired to real features | Atlas summary table; count of *implemented* (not merely mapped) injectors; the zero-day holdout family |
 | 2 | **Fidelity of simulation** | `mantis/foundry/fidelity/` — the fidelity scorecard | Marginal KS distances, MCC / amount / hour-of-day mixes vs. reference, a TSTR (train-synthetic-test-real) number. Measured, printed, and honestly imperfect. |
-| 3 | **Detection efficacy** | `mantis/defense/` — the five-layer Mandate Firewall | AUC-PR and **recall@0.1%FPR** per layer and fused; per-family recall; the zero-day holdout result |
+| 3 | **Detection efficacy** | `mantis/defense/` — the five-layer Mandate Firewall | AUC-PR and **recall@0.1%FPR** per layer and fused, as a curve over 0.1/0.5/1.0% FPR; per-family recall, **event-level and campaign-level side by side**; the zero-day holdout result |
 | 4 | **Novelty** | `mantis/loop/` — evolutionary adversary + retrain harness | Evasion-rate-vs-generation curve; SHAP-guided mutation; cards found by the discovery agent |
 | 5 | **Real-world feasibility** | `mantis/core/events.py` — the schema | `TxEvent` is a **superset of a real card authorisation** plus an agentic extension. An issuer could drop this in behind an existing auth stream without re-platforming. Plus: L0 rules are deployable today, and the latency budget is reported. |
 
@@ -334,8 +334,275 @@ When time runs out — and it will — sacrifice in **this order**, top first:
   10,600 fraud, time-split 707k/303k. **L1 AUC-PR 0.4910, recall@0.1%FPR
   0.3615**; per rail, agentic 0.503 and classic 0.242. 225 tests, ruff clean.
   Full table in `RESULTS.md`.
-- **Next up**: the fidelity scorecard (`foundry/fidelity/`), then L3/L4 and the
-  live console. Do not start these before the day they are scheduled.
+- **Day 5 complete** — the layers that read *intent* and *relations*, and the loop:
+  - **Framing change first.** L2 demoted to residual monitor and drift canary;
+    the zero-day answer is now L0's protocol invariants plus the closed loop.
+    See "The zero-day answer, reframed" above — it outranks anything Day 4 said
+    about L2 rescuing a held-out family.
+  - **`mantis/defense/l4_graph/`**: 28 streamed graph features. Union-find over
+    an **identity** graph (customer ↔ device ↔ agent) plus windowed distinct
+    counters for the merchant and BIN sides. Read-then-fold per event, exactly
+    like the velocity store, so it is backward-looking by construction and needs
+    no fit/transform split. **0.021 ms/row.**
+  - **`mantis/defense/l3_text/`**: a **page** classifier — TF-IDF + logistic
+    regression over the committed content corpus — with an event scored as the
+    worst page its agent read. `L3Model.fit` **has no `y` parameter**: its label
+    is the artefact's own `injected` flag, a property of text rather than of a
+    transaction. Two hold-out protocols, an unseen *phrasing* and an unseen
+    *kind*.
+  - **`mantis/defense/fusion/`**: a logistic stacker over layer percentiles,
+    fitted on an inner 20% slice of the training window that none of the base
+    layers was fitted on. Replaces the unweighted noisy-OR that made Day 4's
+    fused score worse than L1 alone.
+  - **`mantis/defense/policy/`** (four-decision enum, boundaries placed at FPR
+    budgets rather than score values) and **`mantis/defense/explain/`**
+    (LightGBM `pred_contrib`, which is the same computation `TreeExplainer`
+    performs, without a wrapper on the scoring path).
+  - **`mantis/loop/`**: genome → mutation → arena → retrain, plus the zero-day
+    demonstration. `data/generated/arena.json` is the gate artefact.
+  - **Two new reporting axes, both mandatory from here on**: recall as a
+    **curve** over 0.1/0.5/1.0% FPR, and **campaign-level** recall next to
+    event-level, each labelled.
+
+- **Day 5 gate (passing)**:
+  - `python -m mantis.loop` — 6 cards, 5 generations, 2 pooled seeds, 581 s.
+    Evasion **0.626 → 0.381** (falling), 9 survivors of which 6 mutated and
+    written back to `mantis/atlas/discovered/`. **Zero-day: 0.811 trained /
+    0.013 held out / 0.539 held out + manufactured, 65.9% of the gap closed.**
+    `data/generated/arena.json` is the artefact.
+  - `python -m mantis.defense` — 1,010,600 events, time-split 707k/303k, **232
+    features** (28 of them the new `gph_` block). **L1 AUC-PR 0.5903,
+    recall@0.1%FPR 0.450** (Day 4: 0.4910 / 0.3615 — the graph block is worth
+    **+0.09 recall** on its own). **Fused 0.483, which finally beats L1**, against
+    Day 4's 0.286 that did not. Campaign-level: L1 0.916, fused 0.908, median
+    first alert on the ring's **2nd or 3rd** event. L3 **1.000 on F1-01 and
+    F1-03**, holding at 1.000 on unseen phrasings *and* on an entirely unseen
+    injection kind. L2 0.002 and L2e 0.000 — L2e's ROC is **0.442**, below
+    chance. Mean recall lost to holding a family out: **+0.277**. 264 tests,
+    ruff clean. Full tables in `RESULTS.md`.
+
+### Day 5 findings
+
+- **The bindings bug that would have cost L3 four fifths of its recall.**
+  `data/cache/content/bindings.jsonl` held 513 bindings — seed 1337's only —
+  because `build_pool` never persisted what the injectors planted. The other
+  four seeds' payloads fell through to the **benign pool**, which is the
+  deliberate universal-resolution behaviour, so nothing errored and nothing
+  warned: L3 would have read innocuous text on 80% of the attack rows and posted
+  a recall four fifths too low. `build_pool` now writes the store, and the
+  committed file holds 2,343 bindings. The lesson generalises: a fallback that
+  cannot fail is a fallback that cannot tell you it fired.
+- **L3's first design was 200x too slow and half as good.** Concatenating each
+  event's chain into one string and handing 700,000 strings to a vectoriser took
+  **16 minutes**, because it re-tokenised the same 234 artefacts hundreds of
+  thousands of times. Classifying the *artefact* and taking a **max over the
+  chain** takes about a second — and scores higher, because summing a chain's
+  vectors dilutes one injected page among eleven innocuous ones. The max is also
+  the question a defender actually asks.
+- **The entity-level novelty experiment failed, and the failure is the finding.**
+  Time-boxed to 30 minutes as planned. L2e — an isolation forest over
+  customer and merchant aggregates rather than event rows — did not move the
+  number, even though it is *generous* to the hypothesis (an entity's vector is
+  aggregated over the whole scoring window, which is a batch review queue and
+  not an authorisation scorer). On the five-seed pool it lands at **ROC 0.442 —
+  below chance**, which is a stronger statement than "it did not work": entity
+  aggregates are *mildly anti-correlated* with fraud here, because the attacks
+  ride on established customers and busy merchants by construction while the
+  genuinely unusual entities are ordinary people with three transactions. On a
+  smaller single-seed run merchant-side entity scoring showed the only flicker of
+  life (ROC 0.66) and it does not survive pooling. The general statement is in
+  §8 above and belongs in the writeup: **attacks built to be distributionally
+  faithful are by construction invisible to distributional anomaly detection**,
+  and a fidelity scorecard and an anomaly-detection recall number are therefore
+  in tension by construction.
+- **Merchants and BINs are excluded from the identity graph on purpose.** With
+  16 BINs and a Zipf merchant curve, one union through a popular merchant fuses
+  the whole file into a single giant component and `component_size` becomes a
+  constant — the classic way naive graph features fail. `tests/test_l4_graph.py`
+  pins the property rather than the implementation: the largest identity
+  component must hold under 10% of nodes. Merchant-side structure is measured
+  the right way instead, as windowed distinct payers and as the number of
+  distinct identity **components** paying one merchant — the ratio between those
+  two is the ring detector, because many payers spanning few components means
+  the payers are related to one another.
+- **The manufactured variants are confined to the training window**, and this is
+  load-bearing for the zero-day claim. A variant landing in the test period sits
+  inside the velocity and graph state of the real test-period attack rows it is
+  being evaluated against, inflating their counts and making them easier to
+  catch for a reason unrelated to what the detector learned. The comparison
+  would have been measuring the injection rather than the transfer.
+- **Two determinism defects, both the Day 1 bug again.** `AttackGenome.label()`
+  and the provenance rebinding in `mutate.py` were both written with `hash()` on
+  a string, which CPython randomises per process — so every arena run and every
+  written-back card id would have differed between runs. Both now go through
+  `stable_seed`. `tests/test_loop.py` pins a literal label rather than comparing
+  two calls in the same process, because a same-process comparison passes on
+  exactly the broken implementation.
+- **Weighted fusion fixed the Day 4 defect, but not on the first attempt — and
+  the second bug is the more interesting one.** Replacing the unweighted noisy-OR
+  with a fitted logistic stacker over layer **percentiles** made the fused score
+  *worse* than L1 alone again (0.104 against 0.553). The cause is that a
+  percentile computed against a finite reference **saturates**: every score above
+  the largest legitimate score maps to exactly 1.0, and at a 0.1% false-positive
+  budget the events being ranked are precisely the ones in that saturated region.
+  L1's ordering inside its own top 0.1% *is* the signal, and the transform threw
+  it away, leaving the fused ranking inside the tie to be settled by L2. Each
+  layer now contributes two columns — its percentile, and its raw score
+  standardised on the fusion window's legitimate rows — and the fused score
+  finally beats L1 (0.565 against 0.553 on the smoke dataset).
+  `tests/test_fusion_policy.py` pins it with a layer whose entire signal lives
+  above every legitimate score.
+- **The arena's cost is linear in cards x population x generations**, and all
+  fifteen cards at population 8 over two pooled seeds runs for about **two
+  hours** — not a gate anybody re-runs. The default is now six cards covering all
+  five implemented families, which is ~35 minutes; `--cards all` is still there
+  for anyone with the time. A curve does not get truer by averaging over cards
+  that behave like the ones already in it.
+- **An alert that says `channel = nan` is worse than no alert.** Seven of the
+  matrix's columns are categorical, and the explain layer coerced every value to
+  a float before printing it, so the single most readable line in the block —
+  which rail the authorisation was on — rendered as `nan`. Values now print as
+  themselves, and a genuine NaN prints as `absent`, because in this matrix NaN
+  overwhelmingly means "this key does not apply to this rail" rather than
+  "unknown".
+- **A circular import that only the graph could have created.**
+  `features/builder` imports `l4_graph.graph`, and `graph` wanted `as_epoch`
+  from `features.state`. The import of `as_epoch` is deferred into the function
+  body; the dependency direction stays one-way at module scope.
+
+- **Three of the nine arena survivors were the *unmutated* attack**, and that is
+  a result about the atlas rather than about the loop. Every card's population is
+  seeded with an **identity genome** so the evasion curve carries its own "what
+  does this attack do without evolution" reference row; that individual competes
+  like any other, and on F2-16, F1-05 and F1-01 it won — the unmutated bust-out
+  evades **77.8%** of decisions on its own. Writing those into
+  `mantis/atlas/discovered/` as "evasive variants" would have claimed a discovery
+  for an attack that was already in `cards/`, which is precisely the overclaim the
+  status ratchet exists to prevent. `writeback.is_novel` filters them, the CLI
+  reports them separately under their own heading, and six genuinely-mutated
+  variants were written back.
+- **The evasion curve falls and then rebounds**, 0.626 → 0.334 → 0.338 → 0.363 →
+  0.381, and the rebound is the more interesting half. Almost the whole fall
+  happens at the **first** retrain: generation 0 is scored against a detector
+  that has never seen a mutated variant and generation 1 against one that has.
+  After that the adversary claws back about a fifth of the ground by finding
+  corners of the gene space the retrain has not covered. The claim the chart
+  supports is therefore the bounded one — **retraining on manufactured variants
+  cuts evasion by 39% and holds it down** — not that it drives evasion to zero.
+  A curve that fell monotonically to zero would be a curve to distrust: with a
+  mutation operator that never stops searching, it would mean the search space
+  was too small to be interesting. `report._curve_reading` picks its prose from
+  the shape the curve actually has, so a future run that rises says so.
+- **The loop found the feature we already knew was too good, on its own.**
+  `genome.py`'s docstring set this up as the check on whether the arena is really
+  searching rather than drifting: *"``deliberation_scale`` is aimed squarely at
+  ``mnd_deliberation_residual_z``, the feature the Day 4 review found separating
+  F1-01 at 0.99 — the loop should discover that one on its own, and whether it
+  does is a check on whether the loop works at all."* Across the six written-back
+  variants the median `deliberation_scale` is **2.93**, with five of six above
+  2.6 — the adversary consistently stretches the agent's deliberation latency,
+  which is precisely the move that kills the residual. It did the same to the new
+  graph block: median `merchant_spread` **0.51**, i.e. re-drawing half the
+  merchant legs to dilute the beneficiary concentration that
+  `gph_merchant_fanin_per_component` measures. Two independent confirmations that
+  the search is finding real gradient in the detector rather than wandering.
+- **The zero-day demonstration works, and this is the submission's argument.**
+  On the loop's own two-seed background, at 0.1% FPR on the real F1 test events:
+  **0.811** with the family in training, **0.013** with it held out, **0.539**
+  held out plus 4,442 loop-manufactured F1 events — **65.9% of the collapse
+  recovered**. What the loop had was F1's *atlas cards*: a written description of
+  a class of attack and an executable generator for it. What it did not have was
+  a single one of the F1 rows it is then scored on, and the variants are not
+  those rows — every gene moved them, and they were selected for **evading** the
+  detector, so they sit off-distribution from the canonical attack in exactly the
+  direction that makes the transfer hard. The honest statement is *"a family
+  described in the atlas but never observed in the data can be manufactured, and
+  training on the manufactured version transfers to the real one"* — **not**
+  "the detector caught something nobody had thought of". Nothing does that, and
+  the whole point of the reframing is that we stopped pretending L2 could.
+
+### The derived-feature probe, and what it found (Day 5 QA)
+
+`scripts/probe_derived.py` (`make derived`) runs the separability gate over the
+**built feature matrix** instead of raw columns, closing the blind spot that let
+`mnd_deliberation_residual_z` reach 0.99 on F1-01 unnoticed. It **flags and
+ranks rather than passing or failing**, because a high number here is not
+automatically a defect: a feature measuring the attack's *mechanism* is
+detection, and only a feature measuring something the *generator* did that the
+attack does not require is an artefact. Verdicts live in `ADJUDICATED` at the
+top of the script so the list shrinks to genuinely new findings.
+
+Five features above 0.95 inside their declared slices, all adjudicated:
+
+| card | feature | auc | verdict |
+|---|---|---|---|
+| F1-04 | `mnd_mcc_in_scope` | 1.000 | **definitional** — being outside the mandated category *is* category drift |
+| F1-01 | `mnd_amount_over_ceiling` | 0.980 | legitimate — the card's own declared L1 signal, and the ratio not the breach flag, so F1-01 stays CLEAN |
+| F6-39 | `ent_mcc_amount_z` | 0.989 | legitimate mechanism, **narrow generator** — `mcc=7832` alone scores 0.904 off six declared MCCs |
+| F6-40 | `txn_round_score` | 0.966 | **artefact** — the raw binary flag is unremarkable, the graded score is not; the injector snaps harder than a real ring would |
+| F1-05 | `mnd_delegation_depth` | 0.952 | known and already priced; the raw-column number is 0.94 and the card's docstring concedes depth alone will not carry it |
+
+Two outstanding foundry items fall out of that and are recorded rather than
+rushed: widen `f6_39_shell_merchant._DECLARED_MCCS`, and soften F6-40's
+round-number snapping. Both re-roll pinned numbers, which is why they are Day 7
+scorecard items and not Day 5 edits.
+
+- **Next up**: the fidelity scorecard (`foundry/fidelity/`), then the live
+  console. Do not start these before the day they are scheduled.
+
+### The zero-day answer, reframed (Day 5) — READ THIS BEFORE WRITING ANY CLAIM
+
+**L2 is demoted.** It was designed and documented as *the zero-day layer* — the
+answer to "what about the attacks you did not think of". Day 4 measured it at
+**0.4% mean per-family recall at 0.1% FPR, 0.62 ROC**, and Day 5 did not chase
+that number. L2's job in the architecture is now:
+
+> **L2 is a residual monitor and a drift canary.** It answers "has the shape of
+> legitimate traffic moved", and it flags the residue that no other layer
+> claims. It is not a detector, and no table may present it as one.
+
+The architecture's actual answer to an unseen attack is now two things, both of
+which need **no labelled example of that attack**:
+
+1. **L0 protocol invariants.** A mandate that is expired, out of scope, over its
+   ceiling, replayed, or whose provenance trail does not terminate at the
+   merchant that was paid, is a **violation of the AP2 contract**, not a
+   statistical outlier. Nine deterministic clauses, no training data, deployable
+   today. An attack that has never been seen still has to break the protocol to
+   move money, and the clauses do not care whether it is novel.
+2. **The closed loop** (`mantis/loop/`). Rather than hoping an unsupervised layer
+   generalises to an attack we never wrote, we **manufacture the attack before an
+   attacker does**: the evolutionary adversary mutates known cards into variants
+   that evade the current detector, those variants are labelled by construction,
+   and L1 retrains on them. The zero-day answer is not "a layer that generalises"
+   — it is "a generator that gets there first."
+
+**Why L2 failed, stated as a finding rather than hidden as a weakness.** This is
+the most interesting negative result in the project and it belongs in the
+writeup:
+
+> **Attacks built to be distributionally faithful are, by construction, invisible
+> to distributional anomaly detection.**
+
+Every design decision in the foundry pushed the attacks *toward* the legitimate
+manifold — clone real background rows, resample amounts from the target MCC's own
+empirical band, redraw the hour of day from the population's diurnal curve,
+widen three legitimate tails specifically so an attack would not be free, keep
+provenance planting length-preserving. The Day 2/Day 3 separability gate is
+literally a rule that says *no single raw column may separate an attack above
+0.95 AUC*. An isolation forest measures distance from the legitimate manifold. We
+spent two days minimising exactly that distance. **Our own fidelity work caused
+this result**, and it is not an artefact — it is the property real GenAI-driven
+fraud has, because an agent that pays with a validly-signed mandate on a real
+cardholder's real device for a plausible amount at a real merchant *is* a
+legitimate-looking transaction in every marginal. The fraud is in the **intent
+and the relations**, not in the marginals. That is why the layers that work are
+the ones reading relations (L4, entity-level) and intent (L3, the ingested text),
+and it is why "just run an autoencoder on it" is not an answer to agentic fraud.
+
+Corollary for the writeup: a fidelity scorecard and an anomaly-detection recall
+number are **in tension by construction**. A project that reports both high is
+reporting one of them wrongly.
 
 ### Day 4 findings that change what we claim
 
@@ -346,9 +613,10 @@ When time runs out — and it will — sacrifice in **this order**, top first:
   **L2 does not rescue it**: 0.4% mean recall at the same operating point,
   0.62 ROC. The honest claim is therefore the narrow one — L2's recall is
   *unaffected* by whether an attack was in training, which is a property no
-  supervised layer has — and the layers that are supposed to close the gap
-  (L3 on provenance text, L4 on the graph) do not exist yet. Do not let the
-  writeup say "the unsupervised layer holds up". It does not, yet.
+  supervised layer has. **Day 5 stopped treating this as a gap to be closed and
+  reframed it as the finding it is** — see "The zero-day answer, reframed"
+  above. Do not let the writeup say "the unsupervised layer holds up". It does
+  not, and it is not supposed to.
 - **Fusion is currently worse than L1 alone** (0.286 vs 0.362). Unweighted
   noisy-OR gives a near-random L2 equal say, and at a fixed 0.1% FP budget that
   costs real recall. The fix is weighted fusion fitted on train — Day 6's job,

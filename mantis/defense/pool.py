@@ -45,6 +45,7 @@ from mantis.foundry.base.reference import load_reference_stats
 from mantis.foundry.base.simulator import SimulationConfig, simulate_frame
 from mantis.foundry.injectors import REGISTRY, get_injector
 from mantis.foundry.injectors.base import PopulationView, run_injector
+from mantis.foundry.llm.corpus import CONTENT_STORE, load_content_store
 
 __all__ = ["POOL_SEEDS", "build_pool"]
 
@@ -90,6 +91,17 @@ def build_pool(
     cards = tuple(attacks) if attacks is not None else tuple(sorted(REGISTRY))
     blocks: list[pd.DataFrame] = []
 
+    # L3 reads the parquet's ``ingested_content_ids`` and looks the text up in
+    # the committed content store. The bindings for *planted* payloads are
+    # written by the injectors into the process-wide store as they run, so they
+    # have to be persisted at the end of the pass or four of these five seeds
+    # would ship with their payloads unbound. An unbound id still resolves --
+    # it falls through to the benign pool by design -- which is exactly why the
+    # bug is worth guarding against: L3 would silently read innocuous text on
+    # 80% of the attack rows and post a recall four fifths too low, with nothing
+    # anywhere reporting an error.
+    load_content_store()
+
     for index, seed in enumerate(seeds):
         cfg = SimulationConfig(
             n_events=n_events,
@@ -125,6 +137,10 @@ def build_pool(
                 f"  seed {seed:>5}: {len(frame):>8,} events, {n_fraud:>5,} fraud "
                 f"({n_fraud / len(frame):.4%})"
             )
+
+    CONTENT_STORE.write()
+    if progress:
+        print(f"  content store: {len(CONTENT_STORE.bindings):,} bindings persisted")
 
     pool = pd.concat(blocks, ignore_index=True)
     return pool.sort_values("ts", kind="stable").reset_index(drop=True)

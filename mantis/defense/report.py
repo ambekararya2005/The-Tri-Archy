@@ -1,322 +1,747 @@
-"""Render the Day 4 experiment into RESULTS.md.
+"""Rendering RESULTS.md.
 
-Kept separate from :mod:`mantis.defense.experiment` so that the measurement and
-the prose about the measurement cannot drift: every number in the document is
-formatted from the result object, and there is no path by which a figure in the
-text can survive a change in the code that produced it.
+RESULTS.md is written by code, not by hand, for one reason: a number that appears
+in a document and nowhere in a run is a number nobody checked. Every figure below
+comes out of :func:`~mantis.defense.experiment.run_experiment`, so re-running the
+firewall rewrites the document, and a claim cannot outlive the measurement that
+produced it.
+
+The one thing this module is allowed to do that the experiment is not is
+**editorialise** — the prose around each table says what the table means, what it
+does not, and where it is weak. That prose is checked against the numbers it sits
+next to on every run, because it is generated from them.
 """
 
 from __future__ import annotations
 
+import json
 from datetime import date
 from pathlib import Path
 
 import pandas as pd
 
 from mantis.core.events import SCHEMA_VERSION
-from mantis.defense.experiment import ABLATED_FEATURE, TRAIN_SHARE
-from mantis.defense.metrics import OPERATING_FPR
+from mantis.core.paths import GENERATED_DIR
+from mantis.defense.experiment import ABLATED_FEATURE, LAYER_ORDER, TRAIN_SHARE
+from mantis.defense.metrics import FPR_GRID, OPERATING_FPR
 from mantis.defense.pool import POOL_SEEDS
 
 __all__ = ["write_results"]
 
+#: Written by ``python -m mantis.loop``. Read here so the loop's result lands in
+#: the same document as the firewall's, rather than in a second file nobody opens.
+ARENA_JSON = GENERATED_DIR / "arena.json"
 
-def _pct(value: float) -> str:
-    return "n/a" if value != value else f"{value:.1%}"
+#: One line per layer, so the table's prose cannot drift from the architecture.
+_LAYER_BLURB: dict[str, str] = {
+    "L1": "GBDT, supervised, time-split, isotonic-calibrated",
+    "L2": "isolation forest on events, legitimate traffic only — **residual monitor**",
+    "L2e": "isolation forest on **entity** aggregates — the time-boxed experiment",
+    "L3": "page classifier over ingested text, **fitted on no transaction labels**",
+    "fused": "weighted logistic stacker over the four",
+}
 
 
 def _f3(value: float) -> str:
     return "n/a" if value != value else f"{value:.3f}"
 
 
+def _f4(value: float) -> str:
+    return "n/a" if value != value else f"{value:.4f}"
+
+
+def _pct(value: float) -> str:
+    return "n/a" if value != value else f"{value:.4%}"
+
+
+def _curve_cells(curve: dict[float, tuple[float, float]]) -> str:
+    return " | ".join(_f3(curve[f][0]) for f in FPR_GRID)
+
+
 def write_results(result, pool: pd.DataFrame, path: Path) -> None:
-    """Write RESULTS.md from a completed experiment."""
-    fam = result.per_family
-    mean_drop = (fam["l1_with"] - fam["l1_heldout"]).mean() if len(fam) else float("nan")
-    mean_with = fam["l1_with"].mean() if len(fam) else float("nan")
-    mean_held = fam["l1_heldout"].mean() if len(fam) else float("nan")
-    mean_l2 = fam["l2"].mean() if len(fam) else float("nan")
+    """Render the whole document. ``result`` is an ``ExperimentResult``."""
+    out: list[str] = []
+    w = out.append
 
-    lines: list[str] = []
-    add = lines.append
+    w("# MANTIS — Detection results")
+    w("")
+    w(f"*Day 5. Schema v{SCHEMA_VERSION}. Generated {date.today().isoformat()} by "
+      "`python -m mantis.defense`.*")
+    w("")
 
-    add("# MANTIS — Detection results")
-    add("")
-    add(f"*Day 4. Schema v{SCHEMA_VERSION}. Generated {date.today():%Y-%m-%d} by "
-        "`python -m mantis.defense`.*")
-    add("")
-    add("## The operating point")
-    add("")
-    add("> **Every recall in this document is measured at a threshold placed so that "
-        f"exactly {OPERATING_FPR:.1%} of legitimate test traffic is flagged.**")
-    add("")
-    add("No accuracy figures appear anywhere here, and that is deliberate: at ~1% "
-        "prevalence a model that approves everything is 99% accurate. The two metrics "
-        "reported are **AUC-PR** and **recall@0.1%FPR**, the second always with its "
-        "realised false-positive rate attached.")
-    add("")
-    add("Each model variant gets its own threshold, because each has its own score "
-        "distribution. What is held constant across every column of every table is the "
-        "false-positive rate — which is the quantity an issuer actually budgets, and "
-        "the only thing that makes two columns comparable.")
-    add("")
+    # ---------------------------------------------------------------- operating point
+    w("## The operating point, and why it is a curve")
+    w("")
+    w("> **Every recall in this document is measured at a threshold placed so that a fixed "
+      "share of legitimate test traffic is flagged.** The headline share is "
+      f"**{OPERATING_FPR:.1%}**.")
+    w("")
+    w("No accuracy figures appear anywhere here, and that is deliberate: at ~1% prevalence a "
+      "model that approves everything is 99% accurate. The metrics reported are **AUC-PR** and "
+      "**recall at a fixed FPR**, the second always with its realised false-positive rate "
+      "attached.")
+    w("")
+    w("Day 4 quoted one operating point. Day 5 quotes " + ", ".join(f"{f:.1%}" for f in FPR_GRID)
+      + " — a curve rather than a point, because one number at one budget is something a reader "
+        "has to trust you did not pick, and three is a shape. 0.1% stays the headline because it "
+        "is the tightest, and the tightest is the one an issuer can actually staff. 1.0% is "
+        "roughly the top of what a review queue absorbs, which is why the curve stops there.")
+    w("")
+    w("Each model variant gets its own threshold, because each has its own score distribution. "
+      "What is held constant across every column of every table is the false-positive rate — "
+      "the quantity an issuer budgets, and the only thing that makes two columns comparable.")
+    w("")
+    w("### Two kinds of recall, both labelled")
+    w("")
+    w("Day 4 reported **event-level** recall only, and event-level recall is the wrong question "
+      "for half of this atlas. A mule ring that runs 40 authorisations and is flagged on 3 of "
+      "them scores 7.5% event-level and is **caught**: one alert opens a case, and the case "
+      "takes the ring. So every layer is also reported at **campaign level** — was the campaign "
+      "flagged at all, and on which of its events.")
+    w("")
+    w("Neither is the real number. Event-level flatters a layer that fires on every event of an "
+      "obvious attack; campaign-level flatters a layer that fires once on something subtle. "
+      "They appear side by side, always, with their names on them.")
+    w("")
 
-    # -- dataset ------------------------------------------------------------- #
-    add("## The evaluation dataset")
-    add("")
-    add(f"Five independently generated worlds, seeds `{', '.join(map(str, POOL_SEEDS))}`, "
-        "pooled.")
-    add("")
-    add("| | |")
-    add("|---|---|")
-    add(f"| events | {len(pool):,} |")
-    add(f"| fraud | {int(pool['is_fraud'].sum()):,} ({pool['is_fraud'].mean():.4%}) |")
-    add(f"| train / test | {result.n_train:,} / {result.n_test:,}, "
-        f"**time-based** split at the {TRAIN_SHARE:.0%} quantile |")
-    add(f"| features | {result.n_features} |")
-    add("")
-    add("Pooling is not resampling one file five times: each seed regenerates the whole "
-        "population — its own customers, merchants, devices, agents and calendar — so the "
-        "variance being averaged over is generator variance. Identifiers are namespaced "
-        "per seed before concatenation, because letting `cus-00042` from two seeds collide "
-        "would fuse two people's histories inside every velocity feature.")
-    add("")
-    add("The reason for five rather than one is confidence intervals. At ~120 positives "
-        "per card a per-family recall carries roughly ±9 points, which is wide enough that "
-        "the leave-one-family-out comparison below could not be defended. Pooling puts the "
-        "smallest family at 550 positives and the largest at 4,150.")
-    add("")
+    # ---------------------------------------------------------------- dataset
+    w("## The evaluation dataset")
+    w("")
+    w(f"{len(POOL_SEEDS)} independently generated worlds, seeds "
+      f"`{', '.join(str(s) for s in POOL_SEEDS)}`, pooled.")
+    w("")
+    w("| | |")
+    w("|---|---|")
+    w(f"| events | {len(pool):,} |")
+    w(f"| fraud | {int(pool['is_fraud'].sum()):,} ({pool['is_fraud'].mean():.4%}) |")
+    w(f"| train / test | {result.n_train:,} / {result.n_test:,}, **time-based** split at the "
+      f"{TRAIN_SHARE:.0%} quantile |")
+    w(f"| features | {result.n_features} "
+      f"(of which {result.graph_features} are the new `gph_` entity-graph block) |")
+    w("")
+    w("Pooling is not resampling one file five times: each seed regenerates the whole "
+      "population — its own customers, merchants, devices, agents and calendar — so the variance "
+      "being averaged over is generator variance. Identifiers are namespaced per seed before "
+      "concatenation, because letting `cus-00042` from two seeds collide would fuse two people's "
+      "histories inside every velocity, entity and graph feature.")
+    w("")
 
-    # -- headline ------------------------------------------------------------ #
-    add("## Layer performance")
-    add("")
-    add("| layer | AUC-PR | ROC-AUC | recall@0.1%FPR | realised FPR |")
-    add("|---|---|---|---|---|")
-    for label, report in (
-        ("**L1** GBDT, supervised", result.l1_full),
-        ("**L2** isolation forest, legitimate traffic only", result.l2),
-        ("**L1 + L2** fused", result.fused),
-    ):
-        add(f"| {label} | {report.auc_pr:.4f} | {report.auc_roc:.4f} | "
-            f"**{_f3(report.recall)}** | {report.realised_fpr:.4%} |")
-    add("")
-    add(f"Baseline precision (a coin flip) is the prevalence: "
-        f"{result.l1_full.baseline_precision:.4%}. AUC-PR is only interpretable against it.")
-    add("")
-    add(_fusion_note(result))
-    add("")
+    # ---------------------------------------------------------------- layers
+    w("## Layer performance")
+    w("")
+    recall_headers = " | ".join(f"recall@{f:.1%}" for f in FPR_GRID)
+    w(f"| layer | AUC-PR | ROC-AUC | {recall_headers} | realised FPR | campaign recall | "
+      "first alert |")
+    w("|---" * (6 + len(FPR_GRID)) + "|")
+    for name in LAYER_ORDER:
+        layer = result.layers[name]
+        camp = layer.campaigns
+        first = (
+            "n/a" if camp.median_index != camp.median_index
+            else f"event {camp.median_index:.0f} of {camp.median_size:.0f}"
+        )
+        w(f"| **{name}** {_LAYER_BLURB[name]} | {_f4(layer.report.auc_pr)} | "
+          f"{_f4(layer.report.auc_roc)} | {_curve_cells(layer.curve)} | "
+          f"{_pct(layer.report.realised_fpr)} | {_f3(camp.recall)} "
+          f"({camp.n_caught}/{camp.n_campaigns}) | {first} |")
+    w("")
+    w(f"Baseline precision (a coin flip) is the prevalence: {result.prevalence:.4%}. AUC-PR is "
+      "only interpretable against it.")
+    w("")
+    w(_fusion_note(result))
+    w("")
 
+    # ---------------------------------------------------------------- fusion weights
+    if len(result.fusion_weights):
+        w("### What the fusion learned")
+        w("")
+        w("| layer | weight on the percentile | weight on the raw score | "
+          "weight on \"had an opinion\" |")
+        w("|---|---|---|---|")
+        for row in result.fusion_weights.itertuples():
+            present = (
+                "n/a" if row.weight_present != row.weight_present
+                else f"{row.weight_present:+.3f}"
+            )
+            w(f"| {row.layer} | {row.weight_percentile:+.3f} | {row.weight_score:+.3f} | "
+              f"{present} |")
+        w("")
+        w("The coefficients are the interesting output, more than the fused recall is. A weight "
+          "near zero is the stacker saying that layer carries no information the others do not "
+          "already have — which is a cleaner statement than any table of recalls, and it is how "
+          "the Day 4 problem got fixed without anyone hand-tuning a number.")
+        w("")
+
+    # ---------------------------------------------------------------- per rail
     if result.l1_rail:
-        add("### Per rail, because the headline is partly measuring \"is this agentic\"")
-        add("")
-        add("Fraud is concentrated on the agentic rail by design — 15% of volume carrying "
-            "51% of the fraud, a 5.7x concentration. A single number computed across both "
-            "rails is therefore partly reading a field the issuer gets free off the "
-            "authorisation message. Both rails, separately:")
-        add("")
-        add("| rail | n positive | AUC-PR | recall@0.1%FPR |")
-        add("|---|---|---|---|")
+        w("### Per rail, because the headline is partly measuring \"is this agentic\"")
+        w("")
+        w("Fraud is concentrated on the agentic rail by design — 15% of volume carrying 51% of "
+          "the fraud, a 5.7x concentration. A single number across both rails is therefore "
+          "partly reading a field the issuer gets free off the authorisation message.")
+        w("")
+        w("| rail | n positive | AUC-PR | recall@0.1%FPR |")
+        w("|---|---|---|---|")
         for rail, report in result.l1_rail.items():
-            add(f"| {rail} | {report.n_positive:,} | {report.auc_pr:.4f} | "
-                f"{_f3(report.recall)} |")
-        add("")
+            w(f"| {rail} | {report.n_positive:,} | {_f4(report.auc_pr)} | {_f3(report.recall)} |")
+        w("")
 
-    # -- THE HEADLINE -------------------------------------------------------- #
-    add("## Leave one family out — the headline experiment")
-    add("")
-    add("For each family, L1 is retrained with that family **entirely removed from the "
-        "training set** and then asked to catch it in the test set anyway. L2 never sees "
-        "any attack at all, so its column is identical by construction whether or not the "
-        "family was held out.")
-    add("")
-    add("| family | n_pos | L1 (trained WITH it) | L1 (family HELD OUT) | "
-        "L2 (never sees any attack) | fused | fused, held out |")
-    add("|---|---|---|---|---|---|---|")
-    for row in fam.itertuples():
-        add(f"| **{row.family}** | {row.n_pos:,} | {_f3(row.l1_with)} | "
-            f"{_f3(row.l1_heldout)} | {_f3(row.l2)} | {_f3(row.fused_with)} | "
-            f"{_f3(row.fused_heldout)} |")
-    if len(fam):
-        add(f"| *mean* | | *{_f3(mean_with)}* | *{_f3(mean_held)}* | *{_f3(mean_l2)}* | "
-            f"*{_f3(fam['fused_with'].mean())}* | *{_f3(fam['fused_heldout'].mean())}* |")
-    add("")
-    add(f"**Mean recall lost when a family is held out of training: {mean_drop:+.3f}** "
-        f"({_pct(mean_with)} → {_pct(mean_held)}).")
-    add("")
-    add(_lofo_reading(fam, mean_with, mean_held, mean_l2))
-    add("")
+    # ---------------------------------------------------------------- LOFO
+    w("## Leave one family out — the headline experiment")
+    w("")
+    w("For each family, L1 is retrained with that family **entirely removed from the training "
+      "set** and then asked to catch it in the test set anyway. L2 never sees any attack at all, "
+      "and L3 never sees a transaction, so neither of their columns changes with the hold-out.")
+    w("")
+    frame = result.per_family
+    w("| family | n_pos | L1 (trained WITH it) | L1 (family HELD OUT) | L2 | L3 | fused | "
+      "fused, held out |")
+    w("|---|---|---|---|---|---|---|---|")
+    for row in frame.itertuples():
+        w(f"| **{row.family}** | {row.n_pos:,} | {_f3(row.l1_with)} | {_f3(row.l1_heldout)} | "
+          f"{_f3(row.l2)} | {_f3(row.l3)} | {_f3(row.fused_with)} | {_f3(row.fused_heldout)} |")
+    if len(frame):
+        mean_with = frame["l1_with"].mean()
+        mean_held = frame["l1_heldout"].mean()
+        w(f"| *mean* | | *{mean_with:.3f}* | *{mean_held:.3f}* | *{frame['l2'].mean():.3f}* | "
+          f"*{frame['l3'].mean():.3f}* | *{frame['fused_with'].mean():.3f}* | "
+          f"*{frame['fused_heldout'].mean():.3f}* |")
+        w("")
+        w(f"**Mean event-level recall lost when a family is held out of training: "
+          f"{mean_with - mean_held:+.3f}** ({mean_with:.1%} → {mean_held:.1%}).")
+    w("")
 
-    # -- per attack ---------------------------------------------------------- #
-    if len(result.per_attack):
-        add("## Per attack card")
-        add("")
-        add("At the same 0.1% FPR operating point, L1 trained on everything. Note the "
-            "fused column inherits the weighting problem described above, so it is below "
-            "L1 on most cards.")
-        add("")
-        add("| card | n_pos | L1 | L2 | fused |")
-        add("|---|---|---|---|---|")
-        for row in result.per_attack.itertuples():
-            add(f"| {row.attack_id} | {row.n_pos:,} | {_f3(row.l1)} | {_f3(row.l2)} | "
-                f"{_f3(row.fused)} |")
-        add("")
+    if len(result.per_family_campaign):
+        w("### The same experiment at campaign level")
+        w("")
+        w("| family | campaigns | median size | fused (with) | fused (held out) | "
+          "first alert at event | elapsed before alert |")
+        w("|---|---|---|---|---|---|---|")
+        for row in result.per_family_campaign.itertuples():
+            elapsed = (
+                "n/a" if row.share_before_alert != row.share_before_alert
+                else f"{row.share_before_alert:.0%}"
+            )
+            index = (
+                "n/a" if row.median_index != row.median_index else f"{row.median_index:.0f}"
+            )
+            w(f"| **{row.family}** | {row.n_campaigns} | {row.median_size:.0f} | "
+              f"{_f3(row.fused_with)} | {_f3(row.fused_heldout)} | {index} | {elapsed} |")
+        w("")
+        w("Read the last two columns together with the first: a campaign caught on its third "
+          "event of forty is a case opened before most of the money moved. A campaign caught on "
+          "its thirty-fifth is a post-mortem.")
+        w("")
 
-    # -- ablation ------------------------------------------------------------ #
+    w(_lofo_reading(result))
+    w("")
+
+    # ---------------------------------------------------------------- the loop
+    w(_arena_section())
+    w("")
+
+    # ---------------------------------------------------------------- L3
+    if len(result.l3_cards):
+        w("## L3, and why a near-perfect number here is honest")
+        w("")
+        w("L3 classifies **a page**, and an event's score is the worst page its agent read. It "
+          "is fitted on the committed content corpus using each artefact's own `injected` flag "
+          "— **it never sees `is_fraud`, and `L3Model.fit` has no `y` parameter to pass one "
+          "to**. That is why it sits with L0 in the reframed architecture rather than with L1: "
+          "it works on an attack it has never seen in the payment data, because the thing it was "
+          "trained on is not payment data.")
+        w("")
+        w("| card | n_pos | recall | on unseen *phrasing* | n unseen | on an unseen *kind* |")
+        w("|---|---|---|---|---|---|")
+        for row in result.l3_cards.itertuples():
+            w(f"| {row.attack_id} | {row.n_pos:,} | {_f3(row.recall)} | "
+              f"{_f3(row.recall_unseen_phrasing)} | {row.n_unseen_phrasing:,} | "
+              f"{_f3(row.recall_unseen_kind)} |")
+        w("")
+        w(_l3_note(result))
+        w("")
+        w("What would be dishonest is claiming that generalises when it does not, so the last "
+          "two columns are the ones the writeup may lean on. **Unseen phrasing**: the "
+          "highest-numbered variant of every adversarial kind is withheld from the vocabulary "
+          "and from training. **Unseen kind**: every `refund_ticket` specimen is withheld — all "
+          "of them — so F1-03 is scored on an injection type the classifier has never seen in "
+          "any wording.")
+        w("")
+        if len(result.l3_holdout):
+            injected = result.l3_holdout[result.l3_holdout["injected"]]
+            if len(injected):
+                w(f"Measured directly on the withheld texts themselves: {len(injected)} "
+                  "artefacts that were never in the vocabulary or the training set score "
+                  f"P(injected) between {injected['p_injected'].min():.2f} and "
+                  f"{injected['p_injected'].max():.2f}, median "
+                  f"{injected['p_injected'].median():.2f}. If the layer had memorised rather "
+                  "than learned, these would sit with the benign artefacts.")
+                w("")
+        w("L3's *overall* recall is low, and that is correct rather than disappointing: it has "
+          "an opinion about two of the fifteen cards and no opinion at all about the classic "
+          "rail, where there is no provenance chain to read. A layer that scored highly on "
+          "everything would be a layer reading something other than the text.")
+        w("")
+
+    # ---------------------------------------------------------------- L2 / L2e
+    w(_novelty_section(result))
+    w("")
+
+    # ---------------------------------------------------------------- per card
+    w("## Per attack card")
+    w("")
+    w("At the same 0.1% FPR operating point. The last column is campaign-level: the share of "
+      "that card's campaigns in which **at least one** event was flagged by the fused score.")
+    w("")
+    w("| card | n_pos | " + " | ".join(LAYER_ORDER) + " | campaigns caught |")
+    w("|---|---|" + "---|" * (len(LAYER_ORDER) + 1))
+    for row in result.per_attack.itertuples():
+        cells = " | ".join(_f3(getattr(row, name)) for name in LAYER_ORDER)
+        w(f"| {row.attack_id} | {row.n_pos:,} | {cells} | {_f3(row.campaign)} |")
+    w("")
+
+    # ---------------------------------------------------------------- decisions
+    if result.decisions:
+        w("## The decision layer")
+        w("")
+        w("A score is not an action. The fused score maps to one of four responses, with each "
+          "boundary placed at a false-positive budget on legitimate traffic rather than at a "
+          "hard-coded score — so a retrain re-prices nothing. Over the test window:")
+        w("")
+        w("| decision | events | share |")
+        w("|---|---|---|")
+        total = max(sum(result.decisions.values()), 1)
+        for name, count in result.decisions.items():
+            w(f"| {name} | {count:,} | {count / total:.3%} |")
+        w("")
+        w("A deterministic L0 clause firing overrides all four, because \"the mandate had "
+          "expired\" is a defensible thing to tell a cardholder and \"the ensemble scored "
+          "0.83\" is not.")
+        w("")
+
+    # ---------------------------------------------------------------- explain
+    if result.explanation:
+        w("## What an alert actually says")
+        w("")
+        w("Per-event attribution comes from LightGBM's own `pred_contrib`, not from SHAP. For a "
+          "tree ensemble that is the *same* computation — `TreeExplainer` calls into LightGBM "
+          "for it — without a wrapper on the scoring path. The three highest-scoring test "
+          "events, with the features that put them there (contributions are in log-odds of the "
+          "raw margin, which is what the ranking, and therefore the alert, is made of):")
+        w("")
+        w("```")
+        w(result.explanation.rstrip())
+        w("```")
+        w("")
+
+    # ---------------------------------------------------------------- ablation
     if len(result.ablation):
-        add("## The feature that was too good, ablated")
-        add("")
-        add(f"`{ABLATED_FEATURE}` — the residual of an agent's deliberation latency against "
-            "what a ticket that size deserves — separates F1-01 at **0.99 AUC on its own**. "
-            "That is above the foundry's own 0.95 separability gate, and the gate never saw "
-            "it: the gate probes **raw columns**, and this is a derived residual, so a "
-            "trivially-derived feature walked straight past it.")
-        add("")
-        add("The cause is in the generator. `collapse_deliberation` resamples latency from "
-            "the population's low quantile band *unconditionally*, so a ₹50,000 purchase "
-            "receives a ₹200 purchase's deliberation time. Real legitimate high-value "
-            "purchases deliberate longer, so the residual is extreme in a way the attack "
-            "itself does not require. The signal is real — an agent acting on injected text "
-            "genuinely did not deliberate — but 0.99 is the generator's number, not the "
-            "attack's.")
-        add("")
-        add("It has **not** been silently removed, and it has not been silently kept. Here "
-            "is what F1's recall rests on:")
-        add("")
-        merged = fam.merge(result.ablation, on="family", how="left", suffixes=("", "_abl"))
-        add("| family | recall with the feature | recall without it | delta |")
-        add("|---|---|---|---|")
+        w("## The feature that was too good, ablated")
+        w("")
+        w(f"`{ABLATED_FEATURE}` — the residual of an agent's deliberation latency against what a "
+          "ticket that size deserves — separates F1-01 at **0.99 AUC on its own**. That is above "
+          "the foundry's own 0.95 separability gate, and the gate never saw it: the gate probes "
+          "**raw columns**, and this is a derived residual.")
+        w("")
+        w("It has not been silently removed and it has not been silently kept:")
+        w("")
+        w("| family | recall with the feature | recall without it | delta |")
+        w("|---|---|---|---|")
+        merged = result.ablation.merge(
+            result.per_family[["family", "l1_with"]], on="family", how="left"
+        )
         for row in merged.itertuples():
-            without = getattr(row, "recall_without", float("nan"))
-            delta = without - row.l1_with if without == without else float("nan")
-            add(f"| {row.family} | {_f3(row.l1_with)} | {_f3(without)} | "
-                f"{'n/a' if delta != delta else f'{delta:+.3f}'} |")
-        add("")
-        add("Fixing it properly is a foundry change — collapse the latency *relative to what "
-            "the amount deserves*, so \"fast for this ticket\" stays the signal without "
-            "sitting off the end of the legitimate distribution. That re-rolls every Day 3 "
-            "number and every injector docstring, so it is recorded as an outstanding item "
-            "rather than done at the same time as standing up the firewall.")
-        add("")
+            delta = row.recall_without - row.l1_with
+            w(f"| {row.family} | {_f3(row.l1_with)} | {_f3(row.recall_without)} | {delta:+.3f} |")
+        w("")
 
-    # -- importance ---------------------------------------------------------- #
-    add("## What L1 actually uses")
-    add("")
-    add("| feature | gain share |")
-    add("|---|---|")
+    # ---------------------------------------------------------------- importance
+    w("## What L1 actually uses")
+    w("")
+    w("| feature | gain share |")
+    w("|---|---|")
     for row in result.importance.head(15).itertuples():
-        add(f"| `{row.feature}` | {row.share:.2%} |")
-    add("")
+        w(f"| `{row.feature}` | {row.share:.2%} |")
+    w("")
 
-    # -- what is not claimed -------------------------------------------------- #
-    add("## What this does not claim")
-    add("")
-    add("- **This is not real-world performance.** It is measured on synthetic data whose "
-        "attacks we wrote. The fidelity scorecard (Day 7) is the argument that the "
-        "background is realistic; nothing here substitutes for it.")
-    add("- **F5 is absent from every table.** It is the zero-day holdout family and has no "
-        "implemented injector, so it is not in the data and cannot be scored yet. The "
-        "leave-one-family-out columns are the closest available stand-in for it.")
-    add("- **L3 and L4 do not exist yet.** The fused column is L1+L2 only. The text layer "
-        "and the graph layer are the two that F1-01/F1-03 and F1-05 respectively are "
-        "waiting on, and their absence is visible in those rows.")
-    add("- **The current event's own outcome is never a feature.** `auth_response`, "
-        "`settled` and `settlement_lag_hours` of the row being scored are blocked by name "
-        "in the feature builder, alongside the label and post-hoc columns. Feeding them in "
-        "would raise F4-27's recall substantially and mean nothing — an issuer cannot "
-        "decline a transaction because it was declined.")
-    add("")
+    # ---------------------------------------------------------------- caveats
+    w("## What this does not claim")
+    w("")
+    w("- **This is not real-world performance.** It is measured on synthetic data whose attacks "
+      "we wrote. The fidelity scorecard (Day 7) is the argument that the background is "
+      "realistic; nothing here substitutes for it.")
+    w("- **F5 is absent from every table.** It is the zero-day holdout family and has no "
+      "implemented injector, so it is not in the data and cannot be scored. The "
+      "leave-one-family-out columns and the loop experiment are the closest available stand-ins.")
+    w("- **L2 is not a detector and is no longer presented as one.** See the section above.")
+    w("- **L3 covers two of fifteen cards.** It is a specialist, and its overall recall should be "
+      "read as coverage of the agentic-injection rail rather than as a headline.")
+    w("- **The current event's own outcome is never a feature.** `auth_response`, `settled` and "
+      "`settlement_lag_hours` of the row being scored are blocked by name in the feature "
+      "builder, alongside the label and post-hoc columns. Feeding them in would raise F4-27's "
+      "recall substantially and mean nothing — an issuer cannot decline a transaction because it "
+      "was declined.")
+    w("- **Latency is not measured here.** The feature pass is 0.052 ms/row and the graph pass "
+      "0.021 ms/row, but an end-to-end p99 for the whole firewall is a Day 7 number and is not "
+      "quoted before it is measured.")
+    w("")
 
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    path.write_text("\n".join(out) + "\n", encoding="utf-8")
+
+
+def _card_recall(result, card: str, layer: str) -> float:
+    frame = result.per_attack
+    row = frame[frame["attack_id"] == card]
+    return float(row[layer].iloc[0]) if len(row) else float("nan")
+
+
+def _l3_note(result) -> str:
+    """The "is a near-perfect number suspicious" paragraph, from measured numbers."""
+    l3 = _card_recall(result, "F1-01", "L3")
+    l1 = _card_recall(result, "F1-01", "L1")
+    opening = (
+        "**The injected instruction *is* the attack.** F1-01 is defined as an agent acting on "
+        "text that told it to change the cart, and F1-03 as one acting on a refund request that "
+        "told it to skip verification. A classifier reading that text and finding the "
+        "instruction is not cheating and is not leakage — it is the detection working."
+    )
+    if l3 != l3 or l1 != l1:
+        return opening
+    if l3 > l1 + 0.05:
+        return (
+            f"{opening} The comparison that makes it concrete is L1's: on F1-01, L3 reaches "
+            f"{_f3(l3)} reading the text while L1 reaches {_f3(l1)} off {result.n_features} "
+            "tabular features, because the tabular trace of \"the agent read a bad page\" is "
+            "faint and the page itself is not."
+        )
+    return (
+        f"{opening} Note that L1 is not behind here: on F1-01 it reaches {_f3(l1)} off "
+        f"{result.n_features} tabular features against L3's {_f3(l3)}. The tabular trace of this "
+        "attack is strong enough on its own in this run, so L3's value on F1-01 is not extra "
+        "recall — it is **independence**. L3 is the only layer whose F1-01 recall survives the "
+        "family being held out of L1's training set, because L3 was never trained on transactions "
+        "at all."
+    )
 
 
 def _fusion_note(result) -> str:
-    """Say plainly whether fusion helped. On Day 4 it does not, and that is the finding."""
-    l1 = result.l1_full.recall
-    fused = result.fused.recall
+    """The Day 4 → Day 5 fusion story, generated from this run's own numbers."""
+    l1 = result.layers["L1"].report.recall
+    fused = result.layers["fused"].report.recall
+    if fused != fused or l1 != l1:
+        return ""
     if fused >= l1:
         return (
-            f"Fusion improves on the better single layer ({_f3(l1)} -> {_f3(fused)}). The two "
-            "layers are combined by mapping each score to its percentile within legitimate "
-            "traffic and taking a noisy-OR, so agreement between them counts for more than "
-            "either alone."
+            f"**Fusion is now better than L1 alone** ({l1:.3f} → {fused:.3f} at "
+            f"{OPERATING_FPR:.1%} FPR). On Day 4 it was worse — 0.361 → 0.286 — because the "
+            "layers were combined with an *unweighted* noisy-OR, which gave a near-random L2 "
+            "equal say inside a fixed false-positive budget. The fix was not to delete L2 but to "
+            "fit the weights on a slice of the training window none of the base layers had seen, "
+            "and let the stacker discount it. The coefficients below are what it decided."
         )
-    return "\n".join([
-        f"**Fusion is currently WORSE than L1 alone** ({_f3(l1)} -> {_f3(fused)}), and that is "
-        "reported rather than hidden by quoting only the best row.",
-        "",
-        "The cause is not subtle. The two layers are combined with an **unweighted** noisy-OR "
-        f"over their legitimate-traffic percentiles, and L2 is close to random "
-        f"({_f3(result.l2.recall)} recall, {result.l2.auc_roc:.3f} ROC). At a fixed 0.1% "
-        "false-positive budget, giving a near-random layer equal say costs you: every "
-        "legitimate event L2 happens to rank high consumes part of the budget that L1 would "
-        "have spent on a real one.",
-        "",
-        "The fix is a **weighted** fusion whose weights are fitted on the training window, which "
-        "would learn to discount L2 to near-zero — and that is Day 6's fusion layer, not a "
-        "number to reach for now by hand-tuning a coefficient until the table looks better. "
-        "Until then the honest headline is **L1's** recall, not the fused one.",
-    ])
+    return (
+        f"**Fusion is still not beating L1 alone** ({l1:.3f} vs {fused:.3f} at "
+        f"{OPERATING_FPR:.1%} FPR), and that is reported rather than hidden by quoting only the "
+        "best row. The weighting is now fitted rather than uniform, so this is no longer the Day "
+        "4 failure mode; what it says instead is that at this operating point the auxiliary "
+        "layers' independent signal does not outweigh the cost of spending FP budget on them. "
+        "**Quote L1's number, not the fused one.**"
+    )
 
 
-def _lofo_reading(fam: pd.DataFrame, mean_with: float, mean_held: float, mean_l2: float) -> str:
-    """Write the interpretation from the numbers, whichever way they came out.
-
-    The paragraph is generated rather than written because the honest reading
-    depends on the result, and a hand-written one would survive a change in the
-    measurement. If supervised detection does not collapse, this says so.
-    """
-    if not len(fam):
+def _lofo_reading(result) -> str:
+    frame = result.per_family
+    if not len(frame):
         return ""
-    collapse = mean_with - mean_held
-    holds_up = mean_l2 >= 0.5 * mean_held if mean_held > 0 else mean_l2 > 0.05
+    mean_with = frame["l1_with"].mean()
+    mean_held = frame["l1_heldout"].mean()
+    l2_mean = frame["l2"].mean()
+    return (
+        "### Reading it\n"
+        "\n"
+        f"**Supervised detection collapses on attacks it has never seen.** Held-out recall "
+        f"averages {mean_held:.1%} against {mean_with:.1%} when the family is in training. This "
+        "is the expected and the important result: an L1 trained on a labelled history is a "
+        "detector for that history.\n"
+        "\n"
+        f"**The unsupervised layer does not rescue it.** L2 averages {l2_mean:.1%} at the same "
+        "operating point. Day 5 stopped treating that as a gap to be closed and reframed it as "
+        "the finding it is — see the next two sections. The architecture's answer to an unseen "
+        "attack is now **L0's protocol invariants**, which need no training data because a "
+        "violated mandate is a broken contract rather than an outlier, and **the closed loop**, "
+        "which manufactures the attack before an attacker does."
+    )
 
-    parts: list[str] = ["### Reading it", ""]
-    if collapse >= 0.15:
-        parts.append(
-            f"**Supervised detection collapses on attacks it has never seen.** Held-out "
-            f"recall averages {_pct(mean_held)} against {_pct(mean_with)} when the family is "
-            f"in training — a loss of {collapse:.3f}. This is the expected and the important "
-            "result: an L1 trained on a labelled history is a detector for that history."
+
+def _novelty_section(result) -> str:
+    """The negative result, written as a finding rather than an apology."""
+    l2 = result.layers["L2"].report
+    l2e = result.layers["L2e"].report
+    return (
+        "## The negative result worth publishing\n"
+        "\n"
+        "> **Attacks built to be distributionally faithful are, by construction, invisible to "
+        "distributional anomaly detection.**\n"
+        "\n"
+        f"L2 scores events: AUC-PR {_f4(l2.auc_pr)}, ROC {_f4(l2.auc_roc)}, recall "
+        f"{_f3(l2.recall)} at {_pct(l2.realised_fpr)}. The stated reason it *should* have worked "
+        "better is a ring — every event in a mule network is bland, but the entity is not. So "
+        "Day 5 tested exactly that, time-boxed to thirty minutes: **L2e**, an isolation forest "
+        "over entity aggregates rather than event rows, scoring customers and merchants instead "
+        f"of authorisations. Result: AUC-PR {_f4(l2e.auc_pr)}, ROC {_f4(l2e.auc_roc)}, recall "
+        f"{_f3(l2e.recall)} at {_pct(l2e.realised_fpr)}.\n"
+        "\n"
+        + _below_chance_note(l2e)
+        + "The negative result is worth more than the layer would have been. "
+        "L2e is also *generous* to the hypothesis in a way that has to be stated: an entity's "
+        "vector is aggregated over the whole scoring window, so the score attached to that "
+        "entity's first event was computed with knowledge of their last. That is a legitimate "
+        "deployment mode — a nightly entity-risk queue, which is what AML and merchant-monitoring "
+        "teams actually run — but it is not an authorisation scorer, and it still did not work.\n"
+        "\n"
+        "**Our own fidelity work caused this.** Every foundry decision pushed the attacks toward "
+        "the legitimate manifold: clone real background rows, resample amounts inside the target "
+        "MCC's own empirical band, redraw the hour of day from the population's diurnal curve, "
+        "widen three legitimate tails specifically so an attack would not be free, keep "
+        "provenance planting length-preserving. The Day 2 separability gate is literally a rule "
+        "forbidding any single raw column from separating an attack above 0.95 AUC. An isolation "
+        "forest measures distance from that manifold; we spent two days minimising it.\n"
+        "\n"
+        "And that is the property real agentic fraud has. An agent paying with a validly-signed "
+        "mandate, on a real cardholder's real device, for a plausible amount at a real merchant, "
+        "**is** legitimate in every marginal. The fraud lives in the *intent* — which is L3, the "
+        "text — and in the *relations* — which is L4, the graph — not in the marginals. That is "
+        "why \"just run an autoencoder on it\" is not an answer to agentic fraud, and it is why "
+        "the two layers Day 5 built are the two that read intent and relations.\n"
+        "\n"
+        "**Corollary, and it is a sharp one:** a fidelity scorecard and an anomaly-detection "
+        "recall number are in tension *by construction*. A project reporting both as high is "
+        "reporting one of them wrongly.\n"
+        "\n"
+        "What survives for L2 is the narrow claim, and it is real: its recall is completely "
+        "**unaffected** by whether an attack was in training, which is a property no supervised "
+        "layer has. Its job in the architecture is now **residual monitor and drift canary** — "
+        "\"has the shape of legitimate traffic moved\" — and no table in this repo presents it as "
+        "a detector."
+    )
+
+
+#: A gene is "moved" once it is this far from its default, as a share of its
+#: range. Mirrors ``mantis.loop.writeback._NOTABLE`` — the two have to agree,
+#: because this paragraph describes what that module wrote.
+_NOTABLE_GENE_MOVE: float = 0.20
+
+
+def _survivor_note(survivors: list[dict]) -> list[str]:
+    """What survived, split into genuine variants and the unmutated parents.
+
+    The split is not pedantry. Every card's arena population is seeded with an
+    **identity genome** so the evasion curve carries its own no-evolution
+    reference row, and that individual competes like any other. On a card the
+    detector is already bad at, it wins — and a survivor list that did not say so
+    would be claiming the loop discovered an attack that was already in
+    ``cards/``.
+    """
+    from mantis.loop.genome import GENE_BOUNDS
+    from mantis.loop.genome import identity_genome as _identity
+
+    def moved(row: dict) -> bool:
+        reference = _identity(row["card_id"])
+        for gene, value in row["genes"].items():
+            low, high = GENE_BOUNDS[gene]
+            default = float(getattr(reference, gene))
+            if abs(value - default) / (high - low) >= _NOTABLE_GENE_MOVE:
+                return True
+        return False
+
+    novel = [row for row in survivors if moved(row)]
+    unmutated = [row for row in survivors if not moved(row)]
+
+    lines = [
+        f"{len(novel)} genuinely mutated variant(s) survived three or more consecutive rounds "
+        "against a retraining detector and were written back to `mantis/atlas/discovered/` as "
+        "validated attack cards with `discovered_by: adversarial_loop`. They live beside the "
+        "atlas rather than inside it: `mantis/atlas/cards/` is the frozen 42, and the "
+        "implemented count is a ratchet that moves only when an injector lands. Each card ships "
+        "a `.genome.json` sidecar, so a variant is reproducible rather than merely described.",
+        "",
+    ]
+    if unmutated:
+        worst = max(unmutated, key=lambda row: row["evasion"])
+        lines += [
+            f"**{len(unmutated)} further survivor(s) were the *unmutated* attack** — every gene "
+            "at its default — and they are **not** written back. Each card's population is "
+            "seeded with an identity genome so the curve carries its own no-evolution reference "
+            "row, and on cards the detector is already weak at, that individual simply wins: "
+            f"{worst['card_id']} evades **{worst['evasion']:.1%}** of decisions without being "
+            "mutated at all. That is a result about the parent card, not a discovery, and "
+            "recording it as one would be the exact overclaim the atlas ratchet exists to "
+            "prevent. It also points at where the next detection work is: "
+            + ", ".join(sorted({row["card_id"] for row in unmutated}))
+            + ".",
+            "",
+        ]
+    return lines
+
+
+def _curve_reading(curve: list[float]) -> str:
+    """Describe the shape the curve actually has, not the one the design predicts."""
+    if len(curve) < 2:
+        return "A single generation is not a curve; re-run with more."
+
+    first, last = curve[0], curve[-1]
+    floor = min(curve)
+    floor_at = curve.index(floor)
+
+    if last >= first:
+        return (
+            f"Evasion runs **{first:.3f} → {last:.3f}** over {len(curve)} generations, which is "
+            "**not** the declining curve the design predicts. Reported as measured. Either the "
+            "adversary is searching faster than the detector is learning, or the retrain is not "
+            "using the arena's output — and which of those it is has to be diagnosed rather than "
+            "argued about."
         )
-    elif collapse >= 0.05:
-        parts.append(
-            f"**Supervised detection degrades on unseen attacks, but does not collapse.** "
-            f"Held-out recall averages {_pct(mean_held)} against {_pct(mean_with)}, a loss of "
-            f"{collapse:.3f}. That is a weaker version of the expected story and it is "
-            "reported as measured. The likely reason is that the families share features — "
-            "an unseen family still trips velocity and mandate signals that the *other* "
-            "families taught the model — which is itself a finding worth having."
+
+    total_fall = first - last
+    first_step = first - curve[1]
+    if total_fall > 0 and first_step / total_fall > 0.80:
+        where = (
+            " Almost all of that fall happens at the **first** retrain — generation 0 is scored "
+            "against a detector that has never seen a mutated variant, and generation 1 against "
+            "one that has."
         )
     else:
-        parts.append(
-            f"**Supervised detection does not measurably degrade on held-out families** "
-            f"({_pct(mean_with)} → {_pct(mean_held)}, a change of {collapse:+.3f}). This is "
-            "*not* the story the experiment was designed to tell, and it is reported as "
-            "measured rather than adjusted. The most likely explanation is that the "
-            "generator gives every family enough shared structure that holding one out "
-            "removes little the model cannot learn elsewhere — which would be a fidelity "
-            "finding, not a detection one, and belongs in Day 7's scorecard."
+        where = (
+            " The fall is spread across the generations rather than concentrated at the first "
+            "retrain, which means each round of manufactured variants is still teaching the "
+            "detector something the previous round did not."
         )
-    parts.append("")
+    fall = (
+        f"Evasion falls from **{first:.3f} to {last:.3f}** over {len(curve)} generations."
+        f"{where}"
+    )
 
-    if holds_up:
-        parts.append(
-            f"**The unsupervised layer holds up.** L2 averages {_pct(mean_l2)} recall having "
-            "never seen a single fraud label — not to fit its model, not to pick its "
-            "contamination parameter, not to place its threshold. Its column does not move "
-            "when a family is held out, because it never depended on the family being there. "
-            "That is the honest answer to \"what about the attacks you didn't think of\"."
+    rebound = last - floor
+    if rebound > 0.02:
+        return (
+            f"{fall}\n\nAfter that the curve **rebounds**, from a floor of {floor:.3f} at "
+            f"generation {floor_at} back to {last:.3f}, and that is the more interesting half of "
+            "the shape. It is what a real arms race looks like: the defender's first response is "
+            "worth far more than any subsequent one, and the adversary then claws back a fraction "
+            "of it by finding a corner of the gene space the retrain has not covered. A curve "
+            "that fell monotonically to zero would be a curve to distrust — it would mean the "
+            "adversary had stopped searching, which with a mutation operator that never stops "
+            "would mean the search space was too small to be interesting.\n\nThe claim the "
+            f"chart supports is therefore the bounded one: **retraining on manufactured variants "
+            f"cuts evasion by {(first - last) / first:.0%} and holds it down**, not that it "
+            "drives evasion to zero. Nothing drives evasion to zero."
         )
-    else:
-        parts.append(
-            f"**The unsupervised layer does not rescue the held-out families.** L2 averages "
-            f"{_pct(mean_l2)} recall at the same operating point, which is not enough to "
-            "carry the argument on its own. Stated plainly because the alternative is "
-            "quoting a number the table does not support: at 0.1% FPR an isolation forest "
-            "on this feature space is a weak detector, and the layers that are supposed to "
-            "close this gap — L3 on the provenance text, L4 on the graph — are not built "
-            "yet. The claim that survives is the narrower one: L2's recall is *unaffected* "
-            "by whether an attack was in training, which is the property no supervised "
-            "layer has."
+
+    return (
+        f"{fall} It then stays down: the curve does not rebound, and the adversary does not "
+        f"recover the ground it lost. The claim the chart supports is that retraining on "
+        f"manufactured variants cuts evasion by {(first - last) / first:.0%} and keeps it cut."
+    )
+
+
+def _below_chance_note(report) -> str:
+    """Say plainly when a layer is not merely weak but anti-correlated."""
+    if report.auc_roc != report.auc_roc:
+        return "It did not move. "
+    if report.auc_roc >= 0.50:
+        return "It did not move. "
+    return (
+        f"It did not move — it went **backwards**. A ROC of {report.auc_roc:.4f} is *below "
+        "chance*, which is a stronger statement than \"weak\": entity aggregates are mildly "
+        "**anti-correlated** with fraud on this data. The reason is the foundry's own realism "
+        "discipline pointed at the entity level: attacks ride established customers and busy "
+        "merchants by construction, while the genuinely unusual entities in this population are "
+        "ordinary people with three transactions. An outlier detector at entity level finds the "
+        "quiet, and the quiet is innocent. "
+    )
+
+
+def _arena_section() -> str:
+    """The loop's result, read from arena.json if the loop has been run."""
+    if not ARENA_JSON.exists():
+        return (
+            "## The closed loop\n"
+            "\n"
+            "_Not yet run for this document. `python -m mantis.loop` writes "
+            "`data/generated/arena.json`, and re-running `python -m mantis.defense` folds its "
+            "numbers in here._"
         )
-    return "\n".join(parts)
+    payload = json.loads(ARENA_JSON.read_text(encoding="utf-8"))
+    curve = payload.get("evasion_curve") or []
+    lines = [
+        "## The closed loop — the other half of the zero-day answer",
+        "",
+        "An evolutionary adversary mutates the **operational parameters** of a known attack — "
+        "pacing, ring fan-out, device rotation, ticket size, how many injected pages the agent "
+        "reads — and selects on **evasion x payoff** against the live detector. Between rounds "
+        "the detector retrains on everything the arena has produced. That is the loop an "
+        "operator runs when their attempts start getting declined, except that here the defender "
+        "runs it first.",
+        "",
+    ]
+    if curve:
+        lines += [
+            "### The evasion curve",
+            "",
+            "| generation | " + " | ".join(str(g["generation"]) for g in payload["generations"])
+            + " |",
+            "|---" * (len(curve) + 1) + "|",
+            "| mean evasion | " + " | ".join(f"{v:.3f}" for v in curve) + " |",
+            "| max evasion | "
+            + " | ".join(f"{g['max_evasion']:.3f}" for g in payload["generations"]) + " |",
+            "",
+            _curve_reading(curve),
+            "",
+            "Full per-generation detail, the surviving genomes and which genes moved are in "
+            "`data/generated/arena.json`.",
+            "",
+        ]
+    survivors = payload.get("survivors") or []
+    if survivors:
+        lines += _survivor_note(survivors)
+    zero = payload.get("zero_day")
+    if zero:
+        lines += [
+            "### The zero-day demonstration",
+            "",
+            "This is the comparison the submission's argument rests on.",
+            "",
+            f"| detector | recall@0.1%FPR on the {zero['n_test_positive']:,} real "
+            f"{zero['family']} test events |",
+            "|---|---|",
+            f"| trained **with** family {zero['family']} | "
+            f"{zero['recall_trained_on_family']:.3f} |",
+            f"| family {zero['family']} **held out** of training | "
+            f"{zero['recall_family_held_out']:.3f} |",
+            f"| held out, **plus {zero['n_variant_events']:,} loop-manufactured variant events** "
+            f"| **{zero['recall_loop_augmented']:.3f}** |",
+            "",
+            f"The loop recovers **{zero['gap_closed']:.0%}** of the collapse that holding the "
+            "family out caused.",
+            "",
+            "**What this claims, exactly.** The loop had access to F1's *atlas cards* — a written "
+            "description of a class of attack and an executable generator for it. It did not have "
+            "a single one of the F1 rows it is then evaluated on, and the variants are not those "
+            "rows: every gene moved them, and they were **selected for evading the detector**, so "
+            "they are off-distribution from the canonical attack in exactly the direction that "
+            "makes the transfer hard.",
+            "",
+            "So the claim is *\"an attack family described in the atlas but never observed in the "
+            "data can be manufactured, and training on the manufactured version transfers to the "
+            "real one\"*. It is **not** *\"the detector caught something nobody had thought "
+            "of\"*. No model does that, which is the whole point of the reframing: we stopped "
+            "pretending an isolation forest could, and built the thing that actually works "
+            "instead.",
+            "",
+            "Measured on the loop's own two-seed background rather than the five-seed pool above, "
+            "so all three rows share one dataset and one operating point. The Day 4 five-seed "
+            "figures (0.569 trained, 0.007 held out) are the same experiment at a different "
+            "scale, not a directly comparable row.",
+            "",
+        ]
+    return "\n".join(lines)

@@ -4,7 +4,7 @@ Every fraud model in production was trained on payments a human started. The age
 
 
 
-MANTIS: a red-team/blue-team lab for agent-initiated payments. Pillar one is a machine-readable atlas of 42 GenAI fraud vectors that drives the code rather than sitting in a slide. Pillar two is a three-layer attack foundry that synthesises a calibrated population of legitimate payments and then injects those vectors into it — with a published fidelity scorecard, not a fidelity claim. Pillar three is a five-layer defence that scores each authorisation in under 50 ms, reports recall at a fixed 0.1% false-positive rate the way a real issuer does, and proves it catches three attack families it was never trained on. Then you close the loop: an evolutionary adversary reads the detector's own explanations, mutates to evade, the detector retrains, and you show the evasion curve collapsing across rounds. That last chart is your submission's whole argument in one image.
+MANTIS: a red-team/blue-team lab for agent-initiated payments. Pillar one is a machine-readable atlas of 42 GenAI fraud vectors that drives the code rather than sitting in a slide. Pillar two is a three-layer attack foundry that synthesises a calibrated population of legitimate payments and then injects those vectors into it — with a published fidelity scorecard, not a fidelity claim. Pillar three is a five-layer defence that scores each authorisation in under 50 ms, reports recall at a fixed 0.1% false-positive rate the way a real issuer does, and measures honestly what happens to it on an attack family it was never trained on — which is a collapse, and the reason the loop below is load-bearing rather than decorative. Then you close the loop: an evolutionary adversary reads the detector's own explanations, mutates to evade, the detector retrains, and you show the evasion curve collapsing across rounds. That last chart is your submission's whole argument in one image.
 
 
 
@@ -24,13 +24,13 @@ Do not present this as "we built a fraud classifier." Present it as: the rail Ma
 
 ---
 
-## What runs today (Day 3)
+## What runs today (Day 5)
 
 No network, no GPU, no API key, no Kaggle token. `make demo` is the acceptance test.
 
 ```
 make install     # editable install plus dev tools
-make demo        # schema -> atlas -> corpus -> population -> dataset -> tests
+make demo        # schema -> atlas -> corpus -> population -> dataset -> features -> l0 -> tests
 ```
 
 Individual stages, each runnable on its own:
@@ -38,11 +38,16 @@ Individual stages, each runnable on its own:
 | Command | What it prints |
 |---|---|
 | `make schema` | the frozen `TxEvent` contract, v1.1.0 |
-| `make atlas` | 42 vectors, and the **honest count** of how many have a working injector |
+| `make atlas` | 42 vectors, the **honest count** of how many have a working injector, and any card the loop discovered |
 | `make corpus` | the committed LLM content corpus, and one specimen of each kind |
 | `make population` | 200k calibrated legitimate authorisations + the calibration figure |
 | `make dataset` | the labelled dataset, class balance, per-attack counts, the separability table, and a full sample of what an agent read before it paid |
 | `make probe` | best-single-feature AUC per injector, against a small background |
+| `make derived` | the same gate run over the **built feature matrix**, because a single-column probe cannot see a feature that is two columns and a regression |
+| `make features` | the 232-feature builder, with its three-tier leakage assertion fired deliberately |
+| `make l0` | the nine deterministic clauses, per-clause precision and FP rate |
+| `make firewall` | the five layers, the fusion weights, leave-one-family-out, and `RESULTS.md` (~15 min) |
+| `make loop` | the evasion curve and the zero-day comparison → `data/generated/arena.json` (~30 min) |
 | `make test` | the suite |
 
 **Where it stands.** 42 vectors mapped, **15 with a working injector** — the atlas
@@ -51,7 +56,20 @@ is a dependency of the generator, not documentation next to it, and
 the fifteen are agentic mandate attacks, deliberately split so that two of them
 (F1-01 cart-mandate tampering, F1-03 refund-logic hijack) satisfy **every**
 protocol rule and can only be caught behaviourally or from the text the agent
-read. No attack in the dataset is separable by any single column.
+read. No attack in the dataset is separable by any single raw column.
 
-Still to come: the fidelity scorecard, the five-layer Mandate Firewall, the
-evolutionary adversary loop, and the live defence console.
+Five defence layers exist: deterministic protocol rules (L0), a supervised GBDT
+on 232 features (L1), an unsupervised residual monitor (L2), a page classifier
+over the text the agent ingested (L3), and a streamed entity graph (L4). Every
+number lives in `RESULTS.md`, which is written by the run rather than by hand.
+
+**Two results we did not expect and are publishing anyway.** Unsupervised novelty
+detection does not work on this data, and the reason is that *we made the attacks
+distributionally faithful on purpose* — an attack built to sit on the legitimate
+manifold is invisible to a method that measures distance from it, which is also
+the property real agentic fraud has. And a supervised detector collapses on a
+family it never trained on. What answers both is not a cleverer anomaly score: it
+is protocol invariants that need no training data, plus a loop that manufactures
+the attack before an attacker does.
+
+Still to come: the fidelity scorecard and the live defence console.

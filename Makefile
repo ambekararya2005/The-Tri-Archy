@@ -1,4 +1,4 @@
-.PHONY: help install lint fmt test atlas schema population figure dataset probe corpus \n        features l0 firewall drift slices gate demo clean
+.PHONY: help install lint fmt test atlas schema population figure dataset probe corpus features l0 firewall render loop arena derived drift slices gate demo clean
 
 PY ?= python
 
@@ -16,7 +16,10 @@ help:
 	@echo "  corpus   build/inspect the committed LLM content corpus (no network)"
 	@echo "  features build the feature matrix and print the leakage assertion firing"
 	@echo "  l0       run the deterministic clauses + the Day 3 bucket-contract verdict"
-	@echo "  firewall THE Day 4 experiment: L1, L2, leave-one-family-out -> RESULTS.md"
+	@echo "  firewall THE Day 4/5 experiment: five layers, fusion, LOFO -> RESULTS.md"
+	@echo "  render   re-write RESULTS.md from the cached run, no refit"
+	@echo "  loop     THE Day 5 gate: evasion curve + zero-day demo -> arena.json"
+	@echo "  derived  the separability probe run over the BUILT feature matrix"
 	@echo "  drift    every marginal vs the reference, against a sampling-noise band"
 	@echo "  slices   audit every probe_slice and print its denominator"
 	@echo "  figure   redraw the calibration figure from the existing parquet"
@@ -82,6 +85,28 @@ l0:
 firewall:
 	$(PY) -m mantis.defense
 
+# Re-render RESULTS.md from the cached experiment, without refitting anything.
+# For editing the document's prose without a fifteen-minute round trip.
+render:
+	$(PY) -m mantis.defense --render-only
+
+# Day 5: the closed loop. Writes data/generated/arena.json -- the evasion curve
+# and the zero-day comparison -- and any surviving variant back into
+# mantis/atlas/discovered/. Re-run `make firewall` afterwards to fold its numbers
+# into RESULTS.md. ~35 minutes; add `--cards all` for the whole atlas and hours.
+loop:
+	$(PY) -m mantis.loop --generations 5 --population 5 --seeds 2 --family F1
+
+# A short arena with no zero-day run, for when you have touched a gene.
+arena:
+	$(PY) -m mantis.loop --generations 3 --population 4 --no-zero-day --no-writeback
+
+# Day 5 QA: the single-feature probe cannot see a feature that is two columns and
+# a regression, which is how mnd_deliberation_residual_z reached 0.99 on F1-01
+# unnoticed. This runs the same gate over the matrix L1 actually trains on.
+derived:
+	$(PY) scripts/probe_derived.py
+
 # Day 4 carry-overs: distribution drift, and the probe-slice audit.
 drift:
 	$(PY) scripts/drift_check.py
@@ -112,10 +137,15 @@ demo: schema atlas corpus population dataset features l0 test
 	@echo "                  per-attack counts, best-single-feature AUC table."
 	@echo "  Day 3 stages:   schema v1.1.0 lifecycle block, LLM content corpus,"
 	@echo "                  7 agentic F1 injectors split HARD/CLEAN, 15 cards."
-	@echo "  Day 4 stages:   204-feature builder with a three-tier leakage assertion,"
-	@echo "                  L0 clauses + bucket-contract verdict. Run 'make firewall'"
-	@echo "                  for L1/L2 and the leave-one-family-out table (~10 min)."
-	@echo "  Pending stages: fidelity scorecard, L3/L4, adversary loop."
+	@echo "  Day 4 stages:   232-feature builder with a three-tier leakage assertion,"
+	@echo "                  L0 clauses + bucket-contract verdict."
+	@echo "  Day 5 stages:   L4 entity graph (28 streamed features), L3 page classifier"
+	@echo "                  with two hold-out protocols, weighted fusion, decision"
+	@echo "                  policy, campaign-level recall, the FPR curve."
+	@echo "                  Run 'make firewall' for the tables (~15 min) and"
+	@echo "                  'make loop' for the evasion curve and the zero-day"
+	@echo "                  comparison (~30 min)."
+	@echo "  Pending stages: fidelity scorecard, live console."
 
 clean:
 	rm -rf .pytest_cache .ruff_cache build dist *.egg-info

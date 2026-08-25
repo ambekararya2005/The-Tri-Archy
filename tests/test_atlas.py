@@ -26,8 +26,16 @@ from __future__ import annotations
 
 import re
 
-from mantis.atlas.loader import ATLAS, by_family, implemented, signals_by_layer, summary
-from mantis.atlas.schema import Family, Layer, Status
+from mantis.atlas.loader import (
+    ATLAS,
+    DISCOVERED,
+    TARGET_CARD_COUNT,
+    by_family,
+    implemented,
+    signals_by_layer,
+    summary,
+)
+from mantis.atlas.schema import DiscoveredBy, Family, Layer, Status
 from mantis.core.events import Channel
 
 #: The atlas as promised in CLAUDE.md section 2. Changing these is a scope change.
@@ -175,3 +183,23 @@ def test_implemented_cards_all_have_a_registered_injector() -> None:
     from mantis.foundry.injectors import REGISTRY
 
     assert {c.id for c in implemented()} == set(REGISTRY)
+
+
+def test_discovered_cards_never_enter_the_atlas_totals() -> None:
+    """The ratchet, protected against the loop.
+
+    ``mantis/atlas/discovered/`` holds cards the adversarial loop found. They are
+    validated by the same model and loadable by the same loader, and they must
+    **not** appear in ``ATLAS`` — the 42 and the implemented count are pinned
+    numbers that may only move when a human writes a card or an injector lands.
+    A loop that could move them by running would make both numbers meaningless.
+    """
+    assert not (set(ATLAS) & set(DISCOVERED))
+    assert len(ATLAS) == TARGET_CARD_COUNT
+    for card in DISCOVERED.values():
+        # Never `implemented`: a variant is its parent's injector plus a genome,
+        # not a module of its own, so an `implemented` status here would either
+        # break the registry assertion or force it to be weakened.
+        assert card.status is Status.MAPPED
+        assert card.generator is None
+        assert card.discovered_by is DiscoveredBy.ADVERSARIAL_LOOP

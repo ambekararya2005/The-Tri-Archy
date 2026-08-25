@@ -36,7 +36,18 @@ from typing import Final
 
 import numpy as np
 
-__all__ = ["OPERATING_FPR", "ScoreReport", "recall_at_fpr", "score_report", "threshold_at_fpr"]
+__all__ = [
+    "FPR_GRID",
+    "OPERATING_FPR",
+    "CampaignReport",
+    "ScoreReport",
+    "campaign_report",
+    "recall_at_fixed_threshold",
+    "recall_at_fpr",
+    "recall_curve",
+    "score_report",
+    "threshold_at_fpr",
+]
 
 #: The operating point every headline number in this project is quoted at.
 OPERATING_FPR: Final[float] = 0.001
@@ -142,3 +153,127 @@ def recall_at_fixed_threshold(
     if not labels.any() or not np.isfinite(threshold):
         return float("nan")
     return float((scores[labels] >= threshold).mean())
+
+
+#: The false-positive budgets every headline number is reported across.
+#:
+#: One number at one FPR is a point a reader has to trust you did not pick. A
+#: curve is a shape, and the shape is the argument: a detector whose recall
+#: climbs steeply from 0.1% to 1.0% is one an issuer can buy more of by
+#: loosening the budget, and one whose recall is flat across the range is not.
+#: 1.0% of an issuer's volume is roughly the top of what a review queue can
+#: absorb, which is why the curve stops there rather than at 5%.
+FPR_GRID: Final[tuple[float, ...]] = (0.001, 0.005, 0.010)
+
+
+def recall_curve(
+    scores: np.ndarray, labels: np.ndarray, fprs: tuple[float, ...] = FPR_GRID
+) -> dict[float, tuple[float, float]]:
+    """``{target_fpr: (recall, realised_fpr)}`` — the curve, not a cherry-picked point."""
+    return {fpr: recall_at_fpr(scores, labels, fpr) for fpr in fprs}
+
+
+@dataclass(frozen=True, slots=True)
+class CampaignReport:
+    """Campaign-level detection, which is the question an investigator asks.
+
+    Event-level recall answers *"what share of fraudulent authorisations did you
+    flag?"*. That is the right question for a decline rule and the wrong one for
+    an investigation: a mule ring that runs 40 events and is flagged on 3 of them
+    is 7.5% event-level recall and **caught**. One alert is enough to open a case,
+    and the case takes the whole ring.
+
+    Both numbers are reported side by side and both are labelled, because each
+    flatters a different kind of detector and quoting only one is how a table
+    becomes an argument rather than a measurement. Event-level flatters a layer
+    that fires on every event of an obvious attack; campaign-level flatters a
+    layer that fires once on something subtle.
+
+    ``median_index`` is the ordinal — 1-based, in timestamp order — of the first
+    flagged event inside a caught campaign. It is the number that says how much
+    money moved before the alert: index 1 is caught on the first authorisation,
+    index 30 of 40 is caught after the ring has already cashed out.
+    """
+
+    n_campaigns: int
+    n_caught: int
+    median_index: float
+    mean_index: float
+    median_size: float
+    #: Share of the campaign's own events that had already happened when the
+    #: first alert fired. Scale-free, so campaigns of different sizes compare.
+    median_share_before_alert: float
+
+    @property
+    def recall(self) -> float:
+        return self.n_caught / self.n_campaigns if self.n_campaigns else float("nan")
+
+    def line(self, label: str) -> str:
+        return (
+            f"  {label:<26} campaigns {self.n_caught:>4}/{self.n_campaigns:<4} "
+            f"({self.recall:.3f})  first alert at event {self.median_index:>5.1f} "
+            f"of {self.median_size:.0f}  ({self.median_share_before_alert:.1%} elapsed)"
+        )
+
+
+def campaign_report(
+    scores: np.ndarray,
+    labels: np.ndarray,
+    campaigns: np.ndarray,
+    order: np.ndarray,
+    threshold: float,
+) -> CampaignReport:
+    """Was each campaign flagged at all, and on which of its events.
+
+    Args:
+        scores: Model scores for every row.
+        labels: Ground truth; only positives take part.
+        campaigns: ``attack_campaign`` per row. Rows with an empty campaign are
+            ignored, which is every legitimate row and any unattributed fraud.
+        order: A sort key putting each campaign's events in chronological order —
+            the timestamp as epoch seconds is what callers pass.
+        threshold: The operating threshold, fitted elsewhere on legitimate
+            traffic. Never refitted here: a campaign-level number at a different
+            FPR from the event-level number next to it is not a comparison.
+    """
+    labels = np.asarray(labels, dtype=bool)
+    scores = np.asarray(scores, dtype=float)
+    campaigns = np.asarray(campaigns, dtype=object)
+    order = np.asarray(order, dtype=float)
+
+    if not np.isfinite(threshold):
+        return CampaignReport(0, 0, float("nan"), float("nan"), float("nan"), float("nan"))
+
+    flagged = scores >= threshold
+    indices: list[int] = []
+    shares: list[float] = []
+    sizes: list[int] = []
+    caught = 0
+    total = 0
+
+    positions = np.flatnonzero(labels)
+    by_campaign: dict[object, list[int]] = {}
+    for i in positions:
+        name = campaigns[i]
+        if name is None or name != name or name == "":
+            continue
+        by_campaign.setdefault(name, []).append(i)
+
+    for rows in by_campaign.values():
+        total += 1
+        rows.sort(key=lambda i: order[i])
+        sizes.append(len(rows))
+        hit = next((rank for rank, i in enumerate(rows, start=1) if flagged[i]), None)
+        if hit is not None:
+            caught += 1
+            indices.append(hit)
+            shares.append((hit - 1) / len(rows))
+
+    return CampaignReport(
+        n_campaigns=total,
+        n_caught=caught,
+        median_index=float(np.median(indices)) if indices else float("nan"),
+        mean_index=float(np.mean(indices)) if indices else float("nan"),
+        median_size=float(np.median(sizes)) if sizes else float("nan"),
+        median_share_before_alert=float(np.median(shares)) if shares else float("nan"),
+    )

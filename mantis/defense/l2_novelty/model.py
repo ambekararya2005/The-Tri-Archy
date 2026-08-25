@@ -1,17 +1,43 @@
 """L2 — unsupervised novelty, trained on LEGITIMATE TRAFFIC ONLY.
 
-The layer that answers "what about the attacks you didn't think of"
---------------------------------------------------------------------
-L1 is supervised, so L1 can only find what it has seen labelled. That is a fatal
-limitation on a rail with no labelled fraud history — which is the entire premise
-of this project — and it is the first thing a good judge will push on.
+**Demoted on Day 5: residual monitor and drift canary, not the zero-day layer.**
 
-L2 is the answer. It never sees a fraud label, not once, not even to choose its
-threshold. It is fitted on the legitimate population and scores how unlike that
-population an event is. Whether an attack was in the training set is therefore
-irrelevant to it by construction, which is why the leave-one-family-out table
-puts L1-held-out and L2 side by side: the first collapses, and the second does
-not move at all.
+This module was written as the answer to "what about the attacks you didn't think
+of". It is not, and the measurement is unambiguous: 0.4% mean per-family recall
+at the 0.1% FPR operating point, 0.62 ROC. Day 5 stopped chasing that number and
+reframed the layer. Its job now:
+
+* **residual monitor** — the residue no other layer claims;
+* **drift canary** — "has the shape of legitimate traffic moved", which is a
+  question it genuinely answers and which nothing else in the firewall does.
+
+It never sees a fraud label, not once, not even to choose its threshold, so its
+recall is completely **unaffected** by whether an attack was in training. That
+property is real and no supervised layer has it. It is also, on its own, not a
+detector, and no table in this repo may present it as one.
+
+Why it failed, which is a finding rather than a weakness
+---------------------------------------------------------
+**Attacks built to be distributionally faithful are, by construction, invisible
+to distributional anomaly detection.** Every foundry decision pushed the attacks
+*toward* the legitimate manifold — clone real rows, resample amounts inside the
+target MCC's own empirical band, redraw the hour from the population's diurnal
+curve, keep provenance planting length-preserving — and the separability gate is
+literally a rule forbidding any raw column from separating an attack above 0.95
+AUC. An isolation forest measures distance from that manifold. We spent two days
+minimising it.
+
+That is also the property real agentic fraud has: an agent paying with a
+validly-signed mandate, on a real cardholder's real device, for a plausible
+amount at a real merchant, is legitimate in every marginal. The fraud lives in
+the **intent** (L3, the text the agent ingested) and the **relations** (L4, the
+entity graph), not in the marginals. See CLAUDE.md, "The zero-day answer,
+reframed".
+
+What answers an unseen attack instead: **L0** protocol invariants, which need no
+training data because a violated mandate is a broken contract rather than an
+outlier; and **the closed loop**, which manufactures the variant before an
+attacker does and hands L1 a label for it.
 
 The discipline that makes the claim true
 ------------------------------------------

@@ -47,6 +47,7 @@ from mantis.defense.features.mandate import MandateBaselines, mandate_features
 from mantis.defense.features.spec import FORBIDDEN_COLUMNS, VELOCITY_KEYS, FeatureConfig
 from mantis.defense.features.transaction import transaction_features
 from mantis.defense.features.velocity import velocity_features
+from mantis.defense.l4_graph.graph import graph_features
 
 __all__ = ["FeatureBuilder", "LeakageError"]
 
@@ -61,6 +62,7 @@ GROUP_PREFIXES: Final[dict[str, str]] = {
     "vel_": "velocity",
     "ent_": "entity",
     "mnd_": "mandate",
+    "gph_": "graph",
 }
 
 
@@ -149,6 +151,12 @@ class FeatureBuilder:
             entity_features(ordered, self.profiles),
             mandate_features(ordered, self.baselines),
         ]
+        if self.config.include_graph:
+            # Streamed, not fitted: the graph reads state from strictly earlier
+            # events and folds the current one in afterwards, so it needs the
+            # same timestamp ordering the velocity pass does and no fit step.
+            # See mantis.defense.l4_graph.graph.
+            blocks.append(graph_features(ordered))
         matrix = pd.concat(blocks, axis=1).reindex(order)
 
         if self.config.include_current_outcome:

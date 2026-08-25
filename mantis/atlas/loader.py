@@ -23,11 +23,14 @@ from mantis.atlas.schema import FAMILY_NAMES, AttackCard, Family, Layer, Status
 __all__ = [
     "ATLAS",
     "CARDS_DIR",
+    "DISCOVERED",
+    "DISCOVERED_DIR",
     "AtlasError",
     "by_family",
     "get",
     "implemented",
     "load_cards",
+    "load_discovered",
     "signals_by_layer",
     "summary",
 ]
@@ -36,6 +39,20 @@ __all__ = [
 TARGET_CARD_COUNT: Final[int] = 42
 
 CARDS_DIR: Final[Path] = Path(__file__).parent / "cards"
+
+#: Cards found by the adversarial loop, kept **beside** the atlas rather than
+#: inside it.
+#:
+#: ``cards/`` is the frozen 42, and ``tests/test_atlas.py`` pins its family counts
+#: and its implemented/mapped split so the number in the writeup cannot drift from
+#: the repo. CLAUDE.md calls the implemented count a ratchet that moves only when
+#: code lands. Writing loop-generated variants into ``cards/`` would move both
+#: numbers with no injector landing, which is exactly the overclaim the ratchet
+#: exists to prevent — so they go here, validated by the same model and loadable by
+#: the same loader, and are reported on their own line. "42 human-authored cards,
+#: N found by the loop" is a stronger claim than "43 cards", because a reader can
+#: see which is which.
+DISCOVERED_DIR: Final[Path] = Path(__file__).parent / "discovered"
 
 
 class AtlasError(RuntimeError):
@@ -87,8 +104,24 @@ def load_cards(directory: Path | None = None) -> dict[str, AttackCard]:
     return dict(sorted(cards.items()))
 
 
+def load_discovered(directory: Path | None = None) -> dict[str, AttackCard]:
+    """Load the loop-discovered cards. An empty or absent directory is not an error.
+
+    Unlike :func:`load_cards`, this returns ``{}`` rather than raising when there
+    is nothing there: a clean clone that has never run ``python -m mantis.loop``
+    has no discovered cards, and that is a normal state, not a broken atlas.
+    """
+    directory = DISCOVERED_DIR if directory is None else directory
+    if not directory.is_dir() or not any(directory.glob("*.yaml")):
+        return {}
+    return load_cards(directory)
+
+
 #: The validated atlas. Import this; do not re-read the YAML yourself.
 ATLAS: Final[dict[str, AttackCard]] = load_cards()
+
+#: Loop-discovered variants. Deliberately **not** merged into ``ATLAS``.
+DISCOVERED: Final[dict[str, AttackCard]] = load_discovered()
 
 
 def get(card_id: str) -> AttackCard:
@@ -162,6 +195,26 @@ def summary(cards: dict[str, AttackCard] | None = None) -> str:
     )
     lines.append("    and mitigations, but the foundry does not generate them. Never blur the")
     lines.append("    two in a slide -- overclaiming coverage loses a technical room.")
+    if cards is None and DISCOVERED:
+        lines.append("")
+        lines.append("  DISCOVERED BY THE ADVERSARIAL LOOP")
+        lines.append(
+            f"    {len(DISCOVERED)} further card(s), in mantis/atlas/discovered/, found by"
+        )
+        lines.append(
+            "    mantis.loop rather than written by a person. They are NOT counted in the"
+        )
+        lines.append(
+            "    totals above, and they are status: mapped -- a variant is its parent's"
+        )
+        lines.append(
+            "    injector plus a genome, not a module of its own, so claiming 'implemented'"
+        )
+        lines.append(
+            "    would weaken the registry assertion that makes the atlas executable."
+        )
+        for card in DISCOVERED.values():
+            lines.append(f"      {card.id}  {card.name}")
     return "\n".join(lines)
 
 
